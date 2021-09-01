@@ -1,0 +1,3452 @@
+
+Going through the VCF files from the GATK output
+
+
+
+```{r}
+library(stringr)
+library(boot)
+#for parallelizing
+library(parallel)
+library(MASS)
+library(data.table) #For rbindlist()
+library(e1071) #For skewness()
+library(ggplot2)
+library(ggrepel)
+library("ggExtra")
+library(ggridges)
+
+```
+
+
+```{r}
+
+# Define PAR regions of chromosome. Ignored SNPs within these regions
+par1 = 10000:2781479
+par2 = 155701382:156030895
+
+#Sample metadata: /data/GTEx/samples/sample_metadata.txt
+
+# Define files and metadata to read in
+#"/home/werner/xchrom_snp_skew/bin/GTEx_ready.txt"       original files
+#100 samples small_sample_test.txt
+#500 samples GTEx_GATK_mod_filt_test_samples.txt
+
+files= read.table("/home/werner/xchrom_snp_skew/bin/GTEx_ready_with_v8.txt") # example of files, should have SRR ids
+#mapping = read.table("/data/GTEx/samples/sample_metadata.txt", sep="\t")          # compiled metadata from samples, original with V7
+#Metadata including the v8 data
+mapping = read.table('/home/werner/xchrom_snp_skew/data/GTEx/samples/sample_metadata_with_v8.txt', sep="\t", header = TRUE)
+meta = match( files[,1], mapping[,1] )                                            # match files to metadata, find lines in metadata file that match samples in files
+meta.filter = !is.na(meta)                                                        # Checking for samples not in the metadata file
+meta.present = meta[meta.filter] # Exclude those samples
+
+
+#For the modified wig and vcf files
+#/GATK_mod_filt/
+wig_files = paste0(files[meta.filter,1],"/GATK_mod_filt/chrX.intersect.wig") # WIG files from runs , input_files = wig_files
+vcf_files = paste0(files[meta.filter,1],"/GATK_mod_filt/chrX.cut")           # VCF files from runs
+
+#For non modified wig and vcf files, the original GATK parameters
+#wig_files = paste0(files[meta.filter,1],"/chrX.intersect.wig") # WIG files from runs , input_files = wig_files
+#vcf_files = paste0(files[meta.filter,1],"/chrX.cut")           # VCF files from runs
+
+
+#Add the rest of the file name
+wig_files = paste0("/data/GTEx/output/", wig_files)
+vcf_files = paste0("/data/GTEx/output/", vcf_files)
+
+
+
+# Initialize variables to save data
+mat.sd = matrix(0, ncol=2, nrow=length(wig_files))
+mat.avg = matrix(0, ncol=2, nrow=length(wig_files))
+list.x = list()
+list.vcf = list()
+
+
+
+#Load in VariantFiltration tables, statistics associated with each SNP for downstream filtering
+#NOT dbSNP filtered!!!!! Will need to match the list.vcf files and the list.vcf.stats files by POS (genome position) for downstream filtering
+#Also these variant tables will not include any indels, which will still be in the unfiltered vcf files, just a heads up
+
+header = '/data/GTEx/output/'
+tail = '/GATK_mod_filt/chrX.snps_filtered.tab'
+
+#The tab delimited files for the annotated raw SNPs coming from the GATK pipeline
+vcf_stat_tables = paste0(files[meta.filter,1], tail)
+vcf_stat_tables = paste0(header, vcf_stat_tables)
+
+list.vcf.stats = list()
+
+stats_skipped = vector(mode='numeric')
+for(i in 1:length(wig_files)){
+  #if the original vcf and wig are empty, just skip the sample
+  if( file.info(wig_files[i])$size == 0 ) {stats_skipped  = c(stats_skipped, i); next}
+  if( file.info(vcf_files[i])$size == 0  ) {stats_skipped  = c(stats_skipped, i); next}
+  list.vcf.stats[[i]] = read.delim(vcf_stat_tables[i])
+}
+
+
+
+
+skipped_files = vector(mode='numeric')
+# Load in and parse data
+for( i in 1:length(wig_files)){
+
+  # Skip empty files 
+  if( file.info(wig_files[i])$size == 0 ) { skipped_files = c(skipped_files, i); next }
+  if( file.info(vcf_files[i])$size == 0 ) { skipped_files = c(skipped_files, i); next }
+  
+  
+  # Read in WIG and corresponding VCF file
+  wig = read.table(wig_files[i])    #test=wig
+  vcf  = read.table(vcf_files[i])
+
+  # Combine negative and positive strand counts
+  wig_counts = wig[,1:6]        #test2=wig_counts
+  wig_counts[,2:6] = wig_counts[,2:6] + wig[,9:13]
+  rm(wig)
+  colnames(wig_counts) = c( "Pos", "A", "C", "G", "T", "N" )
+  
+  #Get total read counts for each position
+  tot_r_counts = rowSums(wig_counts[,2:6]) 
+  #Delineate the number of SNPs at a position
+  b = rowSums(wig_counts[,2:5]>0)
+ 
+
+  # Remove PAR regions
+  m = match( wig_counts[,1], par1) #Find positions in par1
+  f.p1 = is.na(m)                  #Save filter for all SNPs not
+  m = match( wig_counts[,1], par2) #Find positions in par2
+  f.p2 = is.na(m)                  #Save filter
+  
+ 
+  # Check and keep positions with at least two SNPs exist
+  f =  b >= 2
+  #If no positions are heterozygous, move to next sample
+  if( sum(f) == 0) {skipped_files = c(skipped_files, i); next; }  
+  
+  # Final filter of all tests
+  f.all =  f & f.p1 & f.p2
+  
+  # Again, if all SNPs are filtered away, skip this entry
+  if( sum(f.all) == 0) { skipped_files = c(skipped_files, i); next; }
+  
+  
+  
+  # Calculate ratios and merge data
+  d = wig_counts[f.all,2:5]/tot_r_counts[f.all]
+  d[d==0]=NA 
+  d = as.matrix(d)
+
+  
+
+    
+  test3.mask = wig_counts[ f.all ,1:5]  #Positions and base counts
+  test3.mask[test3.mask < 10] = 0       #Set base counts lees than 10 to 0, excluding these.  READ COUNT FILTER##########################################
+  b3.mask = rowSums(test3.mask[,2:5]>0) #Filtered, delineate number of SNPS at a position
+  
+  # Skip polymorphic sites (ie more than SNPs)
+  m = match(test3.mask[b3.mask==2,1], vcf[,1])  #Match the positions that have only 2 alleles to their chromosome positions
+  f.t = !is.na(m)                               #The ones that matched
+  f.v = m[f.t]                                  #Keep the positions that matched
+  
+  # Again, if all SNPs are filtered away, skip this entry
+  if( sum(f.t) <= 1) {skipped_files = c(skipped_files, i); next; }
+  
+
+
+  # Tidy up, find ref and alt
+  temp.vcf = cbind(d[b3.mask==2,][f.t,], vcf[f.v,3:4]) #get the ratios of positions that only have 2 alleles, and add on the Ref and Alt allele from the VCF file
+
+
+  ref1 = as.character(temp.vcf[,5]) == "A"             #Grab all the reference A's, and so on
+  ref2 = as.character(temp.vcf[,5]) == "C"
+  ref3 = as.character(temp.vcf[,5]) == "G"
+  ref4 = as.character(temp.vcf[,5]) == "T"
+  
+  alt1 = as.character(temp.vcf[,6]) == "A"             #Grab all the alternative A's, and so on
+  alt2 = as.character(temp.vcf[,6]) == "C"
+  alt3 = as.character(temp.vcf[,6]) == "G"
+  alt4 = as.character(temp.vcf[,6]) == "T"
+  
+  
+  #Above is screening only for single nucleotide substitutions, trying below to include all kinds of variants
+  #For variants other than single base substitutions, the wig matches the read number/base to the last base of the indel
+  #n = nchar(as.character(temp.vcf[,5]))
+  #ref1 = substring(as.character(temp.vcf[,5]),n,n) == "A"
+  #ref2 = substring(as.character(temp.vcf[,5]),n,n) == "C"
+  #ref3 = substring(as.character(temp.vcf[,5]),n,n) == "G"
+  #ref4 = substring(as.character(temp.vcf[,5]),n,n) == "T"
+  
+  #n = nchar(as.character(temp.vcf[,6]))
+  #alt1 = substring(as.character(temp.vcf[,6]),n,n) == "A"
+  #alt2 = substring(as.character(temp.vcf[,6]),n,n) == "C"
+  #alt3 = substring(as.character(temp.vcf[,6]),n,n) == "G"
+  #alt4 = substring(as.character(temp.vcf[,6]),n,n) == "T"
+  
+  
+  ref.only = c(temp.vcf[ref1,1], temp.vcf[ref2,2], temp.vcf[ref3,3], temp.vcf[ref4,4])  #Combine all the reference SNPs ratios
+  alt.only = c(temp.vcf[alt1,1], temp.vcf[alt2,2], temp.vcf[alt3,3], temp.vcf[alt4,4])  #Combine all the alternative SNPs ratios
+  
+  
+  temp2.vcf = cbind(test3.mask[b3.mask==2,2:5][f.t,], vcf[f.v,3:4])                     #Grab the filtered SNPs and their alleles, for only those with two alleles
+  temp3.vcf = temp2.vcf[,1:2]                                                           #Set up structure to hold the combined Ref / Alt counts per position of the filtered SNPS
+  temp3.vcf = temp3.vcf*0
+  
+  #Starting filling in the ref and alt counts
+  #Produces the ref and alt read counts for the heterozygous SNPs
+  temp3.vcf[ref1,1] = temp2.vcf[ref1,1]
+  temp3.vcf[ref2,1] = temp2.vcf[ref2,2]
+  temp3.vcf[ref3,1] = temp2.vcf[ref3,3]
+  temp3.vcf[ref4,1] = temp2.vcf[ref4,4]
+  
+  temp3.vcf[alt1,2] = temp2.vcf[alt1,1]
+  temp3.vcf[alt2,2] = temp2.vcf[alt2,2]
+  temp3.vcf[alt3,2] = temp2.vcf[alt3,3]
+  temp3.vcf[alt4,2] = temp2.vcf[alt4,4]
+
+
+
+  #filtering out Variants with , in them, they are multiple alleles missed previously
+
+  allele.f1 = sapply(1:length(temp2.vcf$V3),function(i) str_count(as.character(temp2.vcf$V3)[i], ',') )    #Ref alleles with commas
+  allele.f2 = sapply(1:length(temp2.vcf$V4),function(i) str_count(as.character(temp2.vcf$V4)[i], ',') )    #Alt alleles with commas
+  allele.f = !(allele.f1 == 1 | allele.f2 == 1)                                                            #Get rid of them
+
+  temp2.vcf = temp2.vcf[allele.f, ]
+  temp3.vcf = temp3.vcf[allele.f, ]
+  
+
+  # Store
+  x = c(alt.only, ref.only)   #Combine all the ratios and get summary stats
+  mat.sd[i,1] = sd(x)
+  mat.avg[i,1] = mean(x)
+  list.x[[i]] = x
+  mat.sd[i,2] = sd(x)/sqrt(length(x))  #Standard error
+  
+  #Get the position (test3.mask[b3.mask==2,1]), the ref/alt read counts (temp3.vcf), the base read counts and ref/alt base(temp2.vcf).
+  list.vcf[[i]] = cbind(test3.mask[b3.mask==2,1][allele.f], temp3.vcf, temp2.vcf)
+  
+  
+}
+
+
+#list.vcf.stats skipped is a subset of list.vcf skipped, make them all NULL for consistency
+list.vcf.stats[skipped_files[!skipped_files %in% stats_skipped]] = list(NULL)
+
+
+# Filter and store counts
+files = files[meta.filter,]      #All the files that passed the filtering/the ones we're going to use
+m = match( files, mapping[,1] )  #Get the metadata for those files
+meta.filter = !is.na(m)
+f.m = m[meta.filter]
+
+
+
+#Skip the files with no SNPs or NA 
+skip_1 = sapply( 1:length(list.vcf), function(i) length(list.vcf[[i]] ) ) == 0
+skip_2 = sapply( 1:length(list.vcf), function(i) is.na(list.vcf[i] ) )
+skip = skip_1 | skip_2
+
+list.vcf.filts = list()
+for(i in which(!skip) ) {
+  temp = list.vcf[[i]][,2:3]/rowSums(list.vcf[[i]][,2:3])                                                                       #Get the ref and alt ratios
+  list.vcf.filts[[i]] = cbind(list.vcf[[i]][,1],temp)[temp[,1] > 0 & temp[,2] > 0 & !is.na(temp[,1]) & !is.na(temp[,2]) ,]      #Keep the ratios where the alt and ref are both non-zero and non-NA
+}
+
+
+#mat.sd          ->  matrix of standard deviation and error for each sample
+#mat.avg         ->  matrix of skew average for each sample
+#list.vcf        ->  a list containing the filtered vcf info for each sample, chromosome position, ref/alt read counts, ACGT read counts, ref/alt genotype
+#list.vcf.stats  ->  a list containing the additional statistics for each variant in a sample, NOT dbSNP FILTERED, will need to match on the POS column for the list.vcf
+#list.x          ->  a list containing the pooled ref and alt ratios for each sample
+#skip            ->  logical vector on whether that sample was skipped or not
+#files           ->  SRR IDs for each sample
+#list.vcf.filt   -> list containing the position and reference   /  alternative SNP read counts
+#wig_files       -> All the wig files for each sample
+#vcf_files       -> Original vcf files for each sample
+#mapping         -> all of the metadata
+#meta.filter     -> Whether the sample was in the metadata
+#f.m             -> metadata line number for each sample
+
+#Original data
+#save(mat.sd, mat.avg, list.vcf, list.x, skip, files,  list.vcf.filts, wig_files, vcf_files, mapping, meta.filter, f.m, 
+#file="/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/500_sample_GATK_original.Rdata")
+```
+
+
+```{r}
+
+#Modified filtering data
+save(mat.sd, mat.avg, list.vcf, list.vcf.stats, list.x, skip, files,  list.vcf.filts, wig_files, vcf_files, mapping, meta.filter, f.m, 
+#file="/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/100_sample_GATK_mod.Rdata")
+#file="/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v7_GATK_mod.Rdata")
+file="/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_mod.Rdata")
+
+```
+
+
+
+
+Now do SNP filtering and picking the max SNP per gene
+
+```{r}
+load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_mod.Rdata")
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v7_GATK_mod.Rdata")
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/500_sample_GATK_original.Rdata")
+```
+
+41349900
+68841386 
+73823309
+
+```{r}
+length(files)
+
+```
+
+```{r}
+head(list.vcf)
+length(list.vcf)
+
+```
+
+```{r}
+length(list.vcf.stats)
+head(list.vcf.stats)
+
+
+```
+
+
+```{r}
+sample_meta = mapping[f.m, ]
+sample_meta
+
+
+```
+
+
+
+```{r}
+#Grab the metadata for the samples
+sample_meta = mapping[f.m, ]
+sample_tissues = names(table(sample_meta[ ,'body_site_s']))
+sample_tissue_table =table(sample_meta[ ,'body_site_s']) 
+
+sample_ids = as.character(sample_meta[ ,'Sample_Name_s'])
+split_sample_ids = lapply(sample_ids, strsplit, split='-', fixed=TRUE)
+donor_id = lapply(split_sample_ids, '[[', 1)        #Get rid of first level
+donor_id =as.character(lapply(donor_id, '[[', 2) )  #Grab the donor ID
+sample_meta$Donor_id = donor_id 
+
+
+head(sample_meta)
+dim(sample_meta)
+
+
+```
+
+```{r}
+#Grouping tissues into larger groups
+sample_tissue_meta = as.character(sample_meta$body_site_s)
+sample_tissue_meta[sample_tissue_meta == 'Adipose - Subcutaneous' | sample_tissue_meta == 'Adipose - Visceral (Omentum)'] = 'Adipose'
+sample_tissue_meta[sample_tissue_meta == 'Artery - Aorta' | sample_tissue_meta == 'Artery - Coronary' | sample_tissue_meta == 'Artery - Tibial' ] = 'Artery'
+sample_tissue_meta[sample_tissue_meta == 'Cervix - Ectocervix' | sample_tissue_meta == 'Cervix - Endocervix'] = 'Cervix'
+sample_tissue_meta[sample_tissue_meta == 'Colon - Sigmoid' | sample_tissue_meta == 'Colon - Transverse'] = 'Colon'
+sample_tissue_meta[sample_tissue_meta == 'Esophagus - Gastroesophageal Junction' | sample_tissue_meta == 'Esophagus - Mucosa' | sample_tissue_meta == 'Esophagus - Muscularis' ] = 'Esophagus'
+sample_tissue_meta[sample_tissue_meta == 'Heart - Atrial Appendage' | sample_tissue_meta == 'Heart - Left Ventricle'] = 'Heart'
+sample_tissue_meta[sample_tissue_meta == 'Skin - Not Sun Exposed (Suprapubic)' | sample_tissue_meta == 'Skin - Sun Exposed (Lower leg)'] = 'Skin'
+sample_tissue_meta[sample_tissue_meta == 'Brain - Amygdala' | sample_tissue_meta == 'Brain - Anterior cingulate cortex (BA24)' | sample_tissue_meta == 'Brain - Caudate (basal ganglia)' | sample_tissue_meta == 'Brain - Cerebellar Hemisphere' | sample_tissue_meta == 'Brain - Cerebellum' | sample_tissue_meta == 'Brain - Cortex' | sample_tissue_meta == 'Brain - Frontal Cortex (BA9)' | sample_tissue_meta == 'Brain - Hippocampus' | sample_tissue_meta == 'Brain - Hypothalamus' | sample_tissue_meta == 'Brain - Nucleus accumbens (basal ganglia)' | sample_tissue_meta == 'Brain - Putamen (basal ganglia)' | sample_tissue_meta == 'Brain - Spinal cord (cervical c-1)' | sample_tissue_meta == 'Brain - Substantia nigra'] = 'Brain'
+
+sample_meta$grouped.tissue = sample_tissue_meta
+
+
+```
+
+```{r}
+
+#Grouping by germ layer
+temp = as.character(sample_meta$grouped.tissue)
+
+temp[temp == 'Adipose' | temp == 'Heart' | temp == 'Whole Blood' | temp == 'Cells - EBV-transformed lymphocytes' | temp == 'Cells - Transformed fibroblasts' | temp == 'Muscle - Skeletal' | temp == 'Adrenal Gland' | temp == 'Artery' | temp == 'Fallopian Tube' | temp == 'Kidney - Cortex' | temp == 'Spleen' | temp == 'Uterus' | temp == 'Cervix' ] = 'Mesoderm'
+
+
+temp[temp == 'Brain' | temp == 'Skin' | temp == 'Breast - Mammary Tissue' | temp == 'Nerve - Tibial' | temp == 'Minor Salivary Gland' | temp == 'Pituitary' ] = 'Ectoderm'
+
+
+temp[temp == 'Lung' | temp == 'Thyroid' | temp == 'Pancreas' | temp == 'Liver' | temp == 'Colon' | temp == 'Small Intestine - Terminal Ileum' | temp == 'Vagina' | temp == 'Ovary' | temp == 'Stomach' | temp == 'Esophagus' | temp == 'Bladder' ] = 'Endoderm'
+
+germ_layer = names(table(temp))
+sample_meta$germ.layer = temp
+head(sample_meta)
+
+```
+
+save the filtered meta data, most of it will be in the skew_and_stats_df later on, but still good to save this
+
+```{r}
+
+save(sample_meta, file = '/home/werner/xchrom_snp_skew/data/GTEx/samples/sample_metadata_with_v8.Rdata')
+
+```
+
+
+
+
+
+```{r}
+
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GTEx_skew_fixed_SNP_filt.Rdata")
+# GENCODE id conversion file. Contains the 'attr' variable.'
+#THESE ARE ANNOTATIONS FOR GRCH37!!!!!!!!!!! Everything was aligned to GRCH38 plus the dbSNP annotation version we're using is for GRCh38.p7
+#load("/data/genomes/human/gene_annotations_v19.Rdata")
+
+#Version 25 is the right annotation file, we might have been filtering away a lot of SNPs by using the wrong annotations
+load("/data/genomes/human/gene_annotations_v25.Rdata")
+head(attr)
+
+```
+
+
+```{r}
+attr[attr$name %in% c('XIST', 'TSIX'), ]
+
+```
+
+
+Check that XIST data is present
+
+```{r}
+
+attr[attr$name == 'XIST', ]
+xist_start = attr[attr$name == 'XIST','start' ]
+xist_end = attr[attr$name == 'XIST','end' ]
+xist_ensembl = attr[attr$name == 'XIST','ensemblID' ]
+#Get the samples that captured heterozygous SNPs on XIST
+sample_xist_index = c()
+for( i in 1:length(list.vcf)){
+  
+  if(is.null(list.vcf[[i]])){next}
+  
+  #Get the SNP positions
+  snp_pos = list.vcf[[i]][[1]]
+  if(sum(snp_pos > xist_start & snp_pos < xist_end) > 0){
+    sample_xist_index = c(sample_xist_index, i)
+    
+    }
+}
+
+#Look at the total XIST expression from all those samples
+xist_exp = c()
+for(i in sample_xist_index){
+
+  positions = list.vcf[[i]][[1]]
+  xist_filt = positions > xist_start & positions < xist_end
+  
+  xist_exp = c(xist_exp, list.vcf[[i]][xist_filt,'A'] + list.vcf[[i]][xist_filt,'C'])
+}
+
+hist(log10(xist_exp), main = 'Total expression of XIST het or Alt homo SNPs from 2978 samples', breaks=32, freq = FALSE)
+lines(density(log10(xist_exp), na.rm=TRUE), lwd = 3)
+```
+
+
+```{r}
+length(files)
+
+
+```
+
+
+
+```{r}
+
+star_header = '/data/GTEx/STARouts/'
+star_tail = '.ReadsPerGene.out.tab'
+
+star_outs = paste0(files, star_tail)
+star_outs = paste0(star_header, star_outs)
+
+star_xist_expression = vector(mode = 'numeric', length = length(star_outs))
+
+#Load in one star_out and save the index for whaere XIST expression is
+test = read.delim(star_outs[1])
+ensembles = unlist(lapply(strsplit(as.character(test[ ,1]),'.', fixed = TRUE ),'[[', 1 )) #Split up the ensemble IDs from their versions
+xist_star_index = which(ensembles == xist_ensembl)
+
+for(i in 1:length(star_outs)){
+  #Load the file
+  read_counts = read.delim(star_outs[i])
+  star_xist_expression[i] = read_counts[xist_star_index, 2] #Grab Xists expression
+}
+
+```
+
+
+```{r}
+
+hist(log10(star_xist_expression), main = 'STAR quantified XIST expression for all 3487 samples', breaks = 32, xlim = c(0,5), freq = FALSE)
+lines(density(log10(star_xist_expression)), lwd = 3)
+```
+
+```{r}
+#Distribution of total XIST expression in the samples that have called het of Alt homo SNPs in XIST
+
+hist(log10(star_xist_expression[sample_xist_index]), main = 'STAR quantified XIST expression for samples with alt XIST alleles', breaks = 32, xlim = c(0,5), freq = FALSE)
+lines(density(log10(star_xist_expression[sample_xist_index])), lwd = 3)
+
+
+```
+
+```{r}
+length(star_xist_expression)
+
+```
+
+So XIST is highly expressed in nearly all samples, 
+
+
+
+
+
+#####################################
+For the GATK-mod files, create a new list with the filtered SNPs per sample, filtering on the additional statistics
+SOR < 3
+FS < 60
+abs(ReadPosRankSum) < 5
+
+wait to do the highly expressed filtering, reads < 3000
+
+
+This will also filter out any remaining indels in the vcf files as the additionaly statistics are only kept for SNPs, not indels
+
+######################################
+
+```{r}
+pos = list.vcf[[2]][ ,1]
+present.f.stats = list.vcf.stats[[2]]$POS %in% pos
+
+
+
+present.f.vcf = pos %in% list.vcf.stats[[2]]$POS
+table(present.f.vcf)
+
+t.list.vcf = list.vcf[[2]][present.f.vcf, ]
+t.list.vcf.stats = list.vcf.stats[[2]][present.f.stats, ]
+
+sor.f = t.list.vcf.stats$SOR < 3
+sor.f[is.na(sor.f)] = TRUE
+fs.f  = t.list.vcf.stats$FS < 60
+fs.f[is.na(fs.f)] = TRUE
+rpos.f = abs(t.list.vcf.stats$ReadPosRankSum) <= 5
+rpos.f[is.na(rpos.f)] = TRUE
+
+all.f  = sor.f & fs.f & rpos.f
+
+t.list.vcf[all.f, ]
+
+
+```
+
+
+
+
+
+```{r}
+
+list.vcf.snp.filtered = list()
+
+for(i in 1:length(list.vcf)){
+  
+  if(is.null(list.vcf[[i]])){next}
+  
+  
+  pos = list.vcf[[i]][ ,1]
+  present.f.stats = list.vcf.stats[[i]]$POS %in% pos
+  present.f.vcf = pos %in% list.vcf.stats[[i]]$POS
+  
+  #If NA, means that stat is not available for that particular SNP, make NAs = true, really only interested in filtering out SNPs that fail the statistics thresholds
+  
+  t.list.vcf = list.vcf[[i]][present.f.vcf, ]
+  t.list.vcf.stats = list.vcf.stats[[i]][present.f.stats, ]
+  
+  sor.f = t.list.vcf.stats$SOR < 3
+  sor.f[is.na(sor.f)] = TRUE
+  fs.f  = t.list.vcf.stats$FS < 60
+  fs.f[is.na(fs.f)] = TRUE
+  rpos.f = abs(t.list.vcf.stats$ReadPosRankSum) <= 5
+  rpos.f[is.na(rpos.f)] = TRUE
+  
+  all.f  = sor.f & fs.f & rpos.f
+  
+  list.vcf.snp.filtered[[i]] = t.list.vcf[all.f, ]
+  
+}
+
+
+head(list.vcf.snp.filtered)
+length(list.vcf.snp.filtered)
+null_check = sapply(1:length(list.vcf.snp.filtered), function(i) is.null(list.vcf.snp.filtered[[i]]))
+table(null_check)
+
+```
+
+```{r}
+xist_exp = c()
+xist_count = 0
+for(i in 1:length(list.vcf.snp.filtered)){
+
+  positions = list.vcf.snp.filtered[[i]][[1]]
+  xist_filt = positions > xist_start & positions < xist_end
+  if(sum(xist_filt, na.rm=TRUE) > 0){xist_count  = xist_count + 1}
+  
+  xist_exp = c(xist_exp, list.vcf.snp.filtered[[i]][xist_filt,'A'] + list.vcf.snp.filtered[[i]][xist_filt,'C'])
+}
+
+hist(log10(xist_exp), main = 'Total expression of XIST het or Alt homo SNPs from 2978 samples', breaks=32)
+#lines(density(log10(xist_exp), na.rm=TRUE), lwd = 3)
+xist_count
+```
+
+
+```{r}
+sample = sample_xist_index[5]
+sample
+positions = list.vcf.snp.filtered[[sample]][[1]]
+xist_filt = positions > xist_start & positions < xist_end
+list.vcf.snp.filtered[[sample]][xist_filt, ]
+
+
+```
+
+
+
+
+
+
+########################################################################################################################################
+Only run this next block once, generating a max SNP per gene list for the GATK stats filtered SNP lists
+
+
+```{r}
+list.vcf = list.vcf.snp.filtered
+
+```
+
+
+
+#########################################################################################################################################
+
+
+
+```{r}
+
+# Create filter of X chromosome genes. 
+f.x = attr$chr == "chrX"
+
+
+# Calculate skew ratios (ref and alt)
+list.skew = list()
+for( j in 1:length(list.vcf)) {
+  if( is.null(list.vcf[[j]]) ) { next }
+  f1 = rowSums(list.vcf[[j]][,2:3] > 0 ) == 2  #Only looking at SNPs that have reads > 0 for both the ref and alt allele
+
+  skews = list.vcf[[j]][f1,1:6]                      #Grab the SNP position and ref alt read counts, only care about the first three fields
+  skews[,4] = rowSums(list.vcf[[j]][f1,2:3])         #Fourth field is the total read counts for that SNP
+  skews[,5:6] = list.vcf[[j]][f1,2:3] / skews[ ,4]   #Fifth and sixth fields are the ref and alt ratios (divided by total read counts)
+
+  list.skew[[j]] = skews
+}
+
+
+#Get the number of SNPs per sample
+Ns = sapply(1:length(list.skew), function(i) dim(list.skew[[i]])[1] ) 
+A = sapply(1:length(list.skew), function(i) is.null(Ns[[i]] ) )  * 1     
+for( i in 1:length(Ns) ) { if( is.null(Ns[[i]]))  { A[i] = 0 } else { A[i] = Ns[[i]] }}
+Ns = A
+
+
+# Find SNP/gene overlaps. Note, takes the first gene if there are genes on positive and negative strands. Need to fix/select. 
+for( j in 1:length(list.skew)) {
+  if( is.null(list.skew[[j]]) ) { next }
+  
+  #For each SNP in the sample, for the attr[f.x, ] (All the xchrom genes) find the SNPs gene index
+  genes.snps = sapply( 1:dim(list.skew[[j]])[1], function(i) which(list.skew[[j]][i,1] > attr[f.x,2]  &  list.skew[[j]][i,1] < attr[f.x,3] ))
+  #If a SNP is not associated with a gene, put NA
+  for(i in 1:length(genes.snps)) { if( length(genes.snps[[i]])==0 ) { genes.snps[[i]] = NA } ;  if( length(genes.snps[[i]]) > 1  ) { genes.snps[[i]] = genes.snps[[i]][1]  }   }
+  
+  
+  if( sum(is.na(genes.snps)*1) == length(genes.snps) ){               #If all the SNPs in the sample are not associated with genes...
+  na_genes = attr[f.x,][unlist(genes.snps),][1:length(genes.snps), ]  #An NA matrix with the attr column names, row number = number of SNPs in the sample
+  list.skew[[j]] = cbind(list.skew[[j]], unlist(genes.snps), na_genes)
+  next
+  }
+  
+  #Add the gene informatino for each SNP in the sample
+  list.skew[[j]] = cbind(list.skew[[j]], unlist(genes.snps), attr[f.x,][unlist(genes.snps),]  )
+  
+}
+
+
+
+
+
+#Picking the most powered SNPs, the SNP with the most reads in a multiple-SNP gene
+
+## Pick max powered SNPs
+list.skew.max = list()
+for(j in 1:length(list.skew)){ 
+  if(Ns[j] > 0 ){  
+    a = list.skew[[j]][,4]   #Get the total read counts for each SNP
+    b = list.skew[[j]][,13]  #Get the ensemble ID
+    
+    abi = tapply(a,b, which.max)   #Find which genes have multiple SNPs, get index of max
+    abi = abi[!is.na(abi)]         #Pull those out
+    abi = cbind(names(abi), abi )  #Put the ensemble ID and number of SNPs together
+    
+    if(length(abi)==0){next}       #If there are no SNPs in annotated genes, just skip
+                                                 #Grab the SNP data for all the SNPs in the gene...     Grab the max
+    maxtest  = lapply(1:dim(abi)[1], function(i) list.skew[[j]][ which(list.skew[[j]][,13]==abi[i,1]),][ as.numeric(abi[i,2] ),] )
+    list.skew.max[[j]] = do.call(rbind, maxtest)  #Rind all max SNPs and store it
+  }
+}
+ rm(maxtest)
+
+
+ 
+## Store as a separate matrices/lists
+ratios.max.genes =  list() 
+ratios.max = list()
+for(j in 1:length(list.skew.max)){ 
+  if(Ns[j] > 0 ){
+    
+    if(is.null(list.skew.max[[j]])){next}  #If there were no SNPs in annotated genes, just skip    
+    
+    ratios.max.genes[[j]] = list.skew.max[[j]][,c(13:17,8:12)]
+    ratios.max[[j]] = list.skew.max[[j]][,5:6]
+  }
+}
+
+
+```
+
+
+
+
+```{r}
+length(list.skew.max)
+head(list.skew.max)
+head(ratios.max.genes)
+null_check = sapply(1:length(list.skew.max), function(i) is.null(list.skew.max[[i]]))
+table(null_check)
+null_check = sapply(1:length(ratios.max.genes), function(i) is.null(ratios.max.genes[[i]]))
+table(null_check)
+
+```
+
+
+```{r}
+xist_count = 0
+for( i in 1:length(list.skew.max)){
+  if( sum(list.skew.max[[i]]$name == 'XIST') >0 ){xist_count = xist_count + 1}
+}
+xist_count
+
+
+```
+
+
+
+
+The corrected filtering
+```{r}
+save(list.skew, list.skew.max,ratios.max.genes,ratios.max, Ns, file="/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_mod_stat_filt_1_20_21.skew.est.max.genes.Rdata")
+#file="/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v7_GATK_mod_stat_filt_11_5_20.skew.est.max.genes.Rdata")
+
+```
+
+
+
+
+#####################################################
+Sticking with just the additional stat filtered SNP lists
+In addition, save an R object with the highly expressed SNPs filtered out
+Also filtering out the highly reference skewed genes
+####################################################
+
+
+Skew modeling section
+
+
+Found out my implementation of the R version of MLE really messes upsometimes, just not going to use it.
+
+```{r}
+
+
+
+
+##############################################
+### Or you can load a few of the files from here. 
+##############################################
+# eg. 
+
+load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_mod_stat_filt_1_20_21.skew.est.max.genes.Rdata")
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v7_GATK_mod_stat_filt_11_5_20.skew.est.max.genes.Rdata")
+```
+
+```{r}
+final_filt.list.skew.max = list.skew.max
+
+
+
+```
+
+```{r}
+rm(list.skew, ratios.max.genes)
+
+
+```
+
+
+```{r}
+head(final_filt.list.skew.max)
+
+```
+
+
+```{r}
+length(final_filt.list.skew.max)
+
+
+```
+
+```{r}
+length(files)
+
+```
+
+
+Lookinng at the filtered UPIC samples
+
+```{r}
+final_filt.list.skew.max[upic_index]
+
+
+```
+
+
+
+Samples that are or are not null
+
+```{r}
+
+skip = c()
+
+
+for(i in 1:length(final_filt.list.skew.max)){
+  if(is.null(final_filt.list.skew.max[[i]])){skip = c(skip, i)}
+}
+
+
+n = 1:length(final_filt.list.skew.max)
+not_skip = n[!n %in% skip]
+
+
+```
+
+
+
+
+Grab the XIST skews here per sample and save for later
+```{r}
+
+xist_ref_skews = vector(mode='numeric', length = length(final_filt.list.skew.max))
+xist_exp = vector(mode='numeric', length = length(final_filt.list.skew.max))
+
+for( i in 1:length(final_filt.list.skew.max)){
+  
+  if(i %in% skip){xist_ref_skews[i] = NA; next}
+  
+  #Grab the reference skew and total expression of XIST for each sample
+  xist_filt = final_filt.list.skew.max[[i]]$name == 'XIST'
+  if(sum(xist_filt) == 0){xist_ref_skews[i] = NA; next}
+  xist_ref_skews[i] = final_filt.list.skew.max[[i]]$C.1[xist_filt]
+  xist_exp[i] = final_filt.list.skew.max[[i]]$A[xist_filt]
+}
+
+
+```
+
+
+```{r}
+xist_count = 0
+for( i in 1:length(final_filt.list.skew.max)){
+  if( sum(final_filt.list.skew.max[[i]]$name == 'XIST') >0 ){xist_count = xist_count + 1}
+}
+xist_count
+```
+
+
+
+
+```{r}
+table(!is.na(xist_ref_skews))
+
+```
+
+
+
+Look at the distributions
+```{r}
+
+
+
+xist_df = data.frame(xist_ref_skews = xist_ref_skews, xist_exp = xist_exp)
+xist_ratios_p = ggplot(xist_df, aes(xist_ref_skews, log10(xist_exp))) + geom_point(alpha=1/8,size=1) + ylab('log SNP reads') + xlab('SNP ref/total ratio') + ggtitle('XIST ratios vs Reads') + 
+  theme(plot.title=element_text(hjust=.5, size=14), axis.title.x = element_text(size=14), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=14), axis.text.y = element_text(size=12)) + 
+  geom_vline(xintercept=.5, color='red')
+ggMarginal(xist_ratios_p, type='density',fill = '#752A8C')
+
+
+```
+
+check out a different gene
+
+```{r}
+
+xist_ref_skews = vector(mode='numeric', length = length(final_filt.list.skew.max))
+xist_exp = vector(mode='numeric', length = length(final_filt.list.skew.max))
+
+for( i in 1:length(final_filt.list.skew.max)){
+  
+  if(i %in% skip){xist_ref_skews[i] = NA; next}
+  
+  #Grab the reference skew and total expression of XIST for each sample
+  xist_filt = final_filt.list.skew.max[[i]]$name == 'MECP2'
+  if(sum(xist_filt) == 0){xist_ref_skews[i] = NA; next}
+  xist_ref_skews[i] = final_filt.list.skew.max[[i]]$C.1[xist_filt]
+  xist_exp[i] = final_filt.list.skew.max[[i]]$A[xist_filt]
+}
+
+xist_df = data.frame(xist_ref_skews = xist_ref_skews, xist_exp = xist_exp)
+xist_ratios_p = ggplot(xist_df, aes(xist_ref_skews, log10(xist_exp))) + geom_point(alpha=1/8,size=1) + ylab('log SNP reads') + xlab('SNP ref/total ratio') + ggtitle('MECP2 ratios vs Reads') + 
+  theme(plot.title=element_text(hjust=.5, size=14), axis.title.x = element_text(size=14), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=14), axis.text.y = element_text(size=12)) + 
+  geom_vline(xintercept=.5, color='red')
+ggMarginal(xist_ratios_p, type='density',fill = '#752A8C')
+
+```
+
+
+
+
+look at the entire called SNP distribution before additional filtering
+
+```{r}
+
+ref_ratios = vector(mode='numeric')
+counts = vector(mode='numeric')
+
+for(i in 1:length(final_filt.list.skew.max)){
+  
+  if(i %in% skip){next}
+  
+  ref_ratios_1 = final_filt.list.skew.max[[i]]$C.1
+  ref_ratios = c(ref_ratios, ref_ratios_1)
+  counts_1 = final_filt.list.skew.max[[i]]$A.1
+  counts = c(counts, counts_1)
+  
+  
+}
+
+
+mod_df = data.frame(ref_ratios = ref_ratios, tot_counts = counts)
+
+
+mod_ratios_p = ggplot(mod_df, aes(ref_ratios, log10(tot_counts))) + geom_point(alpha=1/8,size=1) + ylab('log SNP reads') + xlab('SNP ref/total ratio') + ggtitle('SNP ratios vs Reads: after GATK stat filtering') + 
+  theme(plot.title=element_text(hjust=.5, size=14), axis.title.x = element_text(size=14), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=14), axis.text.y = element_text(size=12)) + 
+  geom_vline(xintercept=.5, color='red')
+ggMarginal(mod_ratios_p, type='density',fill = '#752A8C')
+
+ggsave(filename='all_called_snps_after_GATK_filtering_v8.pdf', device='pdf', path = '/home/werner/xchrom_snp_skew/code/graphs/summary_graphs', units='in', height=5, width=7, dpi=300, useDingbats = FALSE)
+
+```
+
+```{r}
+num_snps_sample = vector(mode = 'numeric', length = length(final_filt.list.skew.max))
+
+for(i in 1:length(final_filt.list.skew.max)){
+  if(i %in% skip){num_snps_sample[i] = 0;next}
+  num_snps_sample[i] = dim(final_filt.list.skew.max[[i]])[1]
+}
+x = 1:length(final_filt.list.skew.max)
+num_snps_sample = num_snps_sample[order(num_snps_sample)]
+
+plot(x, num_snps_sample)
+
+```
+
+
+
+Filter out the highly expressed genes
+
+
+```{r}
+
+#check_1 = vector(mode='numeric', length = length(final_filt.list.skew.max))
+check_1 = sapply(1:length(final_filt.list.skew.max), function(i) dim(final_filt.list.skew.max[[i]])[1]) 
+
+for(i in 1:length(final_filt.list.skew.max)){
+  
+  if(is.null(final_filt.list.skew.max[[i]])){next}
+  
+  high_filt = final_filt.list.skew.max[[i]]$A.1 < 3000
+  
+  final_filt.list.skew.max[[i]] = final_filt.list.skew.max[[i]][high_filt, ]
+  
+}
+
+check_2 = sapply(1:length(final_filt.list.skew.max), function(i) dim(final_filt.list.skew.max[[i]])[1]) 
+
+```
+
+
+
+```{r}
+plot(unlist(check_1), unlist(check_2))
+
+
+
+```
+
+
+
+
+
+
+
+Pool together the gene specific ref SNP ration distributions, calculate Pearson's coefficient of skews, rank them and see what I get
+
+
+First get a list of all the genes in the dataset
+```{r}
+
+genes = c()
+
+for(i in 1: length(final_filt.list.skew.max)){
+  if(is.null(final_filt.list.skew.max[[i]])){next}
+  genes = c(genes, as.character(final_filt.list.skew.max[[i]]$name))
+  
+}
+
+genes = unique(genes)
+length(genes)
+
+```
+
+
+Go through the dataset for each gene, building a data frame with all the SNP info for that gene
+
+
+```{r}
+
+#Function to get the gene specific data from a sample
+gene_filt = function(gene_name, data){
+  filt = data$name == gene_name
+  return(data[filt, ])
+}
+
+
+#To hold all the gene specific dataframes
+compiled_gene_data = list()
+
+for(i in 1:length(genes)){
+  print(sprintf('Starting to process: %s %s', genes[i], Sys.time() ))
+  compiled_gene_data[[i]] = data.frame(rbindlist(lapply(not_skip, function(x) gene_filt(genes[i], final_filt.list.skew.max[[x]]))))
+}
+
+
+```
+
+Also get the sample index of each gene
+
+```{r}
+length(not_skip)
+
+```
+
+```{r}
+which(genes == 'IRAK1')
+
+```
+
+
+
+
+
+
+```{r}
+head(compiled_gene_data)
+
+
+```
+
+
+```{r}
+
+#Get the skew coefficient
+ref_skew = sapply(1:length(compiled_gene_data), function(i) skewness(compiled_gene_data[[i]]$C.1, type=3))
+
+names(ref_skew) = genes
+ordered_skew_gene_names = names(ref_skew[order(ref_skew)])
+
+```
+
+
+```{r}
+ordered_skew_gene_names
+
+```
+
+
+
+Save all the gene distributions
+```{r}
+
+
+for(i in 1:length(ordered_skew_gene_names)){
+  
+  #Get the index, following the ordering of the Skew coefficient
+  index = which(genes == ordered_skew_gene_names[i])
+  
+  data = compiled_gene_data[[index]]$C.1
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',ordered_skew_gene_names[i], n )
+  
+  filename = sprintf('/home/werner/xchrom_snp_skew/code/graphs/ref_bias_gene_distributions/%s.pdf',ordered_skew_gene_names[i] )
+  pdf(file = filename)
+  hist(compiled_gene_data[[index]]$C.1, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+  dev.off()
+  
+  
+  
+
+}
+
+
+
+```
+
+
+
+
+Order genes by their skew coefficients and then
+only look at genes that are present in at least 100 samples
+```{r}
+
+#Get the number of samples a gene is present in
+num_samps_per_gene = sapply(1:length(compiled_gene_data), function(i) dim(compiled_gene_data[[i]])[1])
+hist(num_samps_per_gene, main = 'number of samples gene is present')
+```
+
+```{r}
+#Filter out the genes with <=100 samples
+filt = num_samps_per_gene > 30
+filt_gene_names = genes[filt]
+low_samp_gene_names = genes[!filt]
+temp_order_genes = ordered_skew_gene_names[ ordered_skew_gene_names %in% filt_gene_names]
+
+
+#Order by skew coefficient
+index = match(temp_order_genes, genes)
+test = compiled_gene_data
+test = test[index]
+
+
+index = match(ordered_skew_gene_names, genes)
+skew_ordered_gene_data = compiled_gene_data[index]
+
+```
+
+```{r}
+
+length(filt_gene_names)
+length(compiled_gene_data)
+length(skew_ordered_gene_data)
+```
+
+
+
+```{r}
+
+for(i in 1:length(test)){
+  data = test[[i]]$C.1
+  
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',temp_order_genes[i], n )
+  
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+}
+```
+
+
+
+____________________________________________________________________________________________
+
+
+#############################
+Perform the diptest, stat test for multi modality. 
+Easiest thing to do is just exclude genes that disprove the null (unimodality)
+#############################
+
+
+```{r}
+library(diptest)
+
+```
+
+```{r}
+
+dip_test = mclapply(1:length(compiled_gene_data), function(i) dip.test(compiled_gene_data[[i]]$C.1, simulate.p.value=TRUE), mc.cores = 15)
+
+```
+
+```{r}
+dip_p_vals = sapply(1:length(dip_test), function(i) dip_test[[i]]$p.value)
+names(dip_p_vals) = genes
+dip_p_vals_corrected = p.adjust(dip_p_vals, method = 'BH')
+
+ordered_dip_p_vals = dip_p_vals_corrected[order(dip_p_vals_corrected)]
+
+
+```
+
+```{r}
+hist(dip_p_vals)
+hist(ordered_dip_p_vals)
+
+```
+
+
+
+
+```{r}
+bimodal_genes = names(ordered_dip_p_vals[ordered_dip_p_vals < .05])
+
+index = genes %in% bimodal_genes
+test = compiled_gene_data[index]
+test_names = genes[index]
+
+for(i in 1:length(test)){
+  data = test[[i]]$C.1
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',test_names[i], n )
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+}
+
+x = 1:14
+y = x
+plot(x,y)
+
+
+bimodal_genes = names(dip_p_vals[dip_p_vals < .05])
+
+index = genes %in% bimodal_genes
+test = compiled_gene_data[index]
+test_names = genes[index]
+
+for(i in 1:length(test)){
+  data = test[[i]]$C.1
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',test_names[i], n )
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+}
+
+```
+
+Just get the names of the gene that fail the diptest, there are some false positives just from looking at the gene distributions, but don't want to cherry pick the genes
+
+```{r}
+bimodal_genes =  names(dip_p_vals[dip_p_vals < .05])
+
+```
+
+
+
+
+
+
+```{r}
+#Order by dip test pvalue
+index = match(names(ordered_dip_p_vals), genes)
+test = compiled_gene_data
+
+test = test[index]
+
+for(i in 1:length(test)){
+  data = test[[i]]$C.1
+  
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g  p-val: %f',names(ordered_dip_p_vals)[i], n, ordered_dip_p_vals[i] )
+  
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+}
+
+```
+
+
+
+########################################
+Or just rank by the gene's skew distribution mean deviance from .5.
+
+
+```{r}
+gene_mean_skews = vector(mode = 'numeric', length = length(compiled_gene_data))
+for(i in 1:length(compiled_gene_data)){
+  data = compiled_gene_data[[i]]$C.1
+  gene_mean_skews[i] = mean(data)
+}
+
+gene_mean_skews_dev = gene_mean_skews - .5
+names(gene_mean_skews_dev) = genes
+
+#Only look at the genes that have at least 30 samples
+test_mean_skew_devs = gene_mean_skews_dev[names(gene_mean_skews_dev) %in% filt_gene_names]
+length(test_mean_skew_devs)
+hist(test_mean_skew_devs, main = 'Deviation from .5 for gene specific mean skews')
+
+#Order by the deviances and chop off the top and bottom 10% of genes
+test_mean_skew_devs = test_mean_skew_devs[order(test_mean_skew_devs)]
+lower_bound = ceiling(length(test_mean_skew_devs)*.05)
+upper_bound = ceiling(length(test_mean_skew_devs)*.95)
+
+#pdf('/home/werner/xchrom_snp_skew/code/graphs/ref_bias_gene_distributions/mean_gene_deviation_filtering.pdf')
+hist(test_mean_skew_devs, main = ' ', breaks = 50, xlab = 'Deviation from .5 for mean gene-specific reference expression ratios', ylab = 'Number of genes')
+abline(v = test_mean_skew_devs[lower_bound], col = 'red', lwd = 2)
+abline(v = test_mean_skew_devs[upper_bound], col = 'red', lwd = 2)
+#dev.off()
+
+
+
+
+filt_mean_skew_devs = test_mean_skew_devs[ceiling(length(test_mean_skew_devs)*.05):ceiling(length(test_mean_skew_devs)*.95)]
+length(filt_mean_skew_devs)
+hist(filt_mean_skew_devs)
+
+```
+
+Look at random gene distributions
+
+```{r}
+random_index = sample(1:length(compiled_gene_data), 10)
+
+for( i in random_index){
+  data = compiled_gene_data[[i]]$C.1
+  
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',genes[i], n )
+  
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+  
+}
+
+```
+
+```{r}
+length(genes)
+
+```
+
+
+
+
+```{r}
+keep_genes = c(low_samp_gene_names, names(filt_mean_skew_devs ))
+
+index = genes %in% keep_genes
+test = compiled_gene_data[index]
+test_names = genes[index]
+
+for(i in 1:length(test)){
+  data = test[[i]]$C.1
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',test_names[i], n )
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+}
+
+
+```
+
+
+
+Find the SNPs that have that weird almost 100% reference skews
+```{r}
+high_ref_skew_genes = c()
+samples_present = c()
+for( i in 1:length(final_filt.list.skew.max)){
+  
+  ref_skews = final_filt.list.skew.max[[i]]$C.1
+  index = ref_skews >= .95
+  high_ref_skew_genes = c(high_ref_skew_genes, as.character(final_filt.list.skew.max[[i]]$name[index]) )
+  if(sum(index) > 0 ){samples_present = c(samples_present,i)}
+}
+high_ref_skew_genes
+samples_present
+
+```
+
+
+Look at PIN4 SNP skews
+
+```{r}
+index = which(genes == 'PIN4')
+data = compiled_gene_data[[index]]$C.1
+n = length(data)
+title = sprintf('Gene: %s  Num Samps: %g',genes[index], n )
+hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+
+```
+
+
+```{r}
+index = which(genes == 'FLNA')
+data = compiled_gene_data[[index]]$C.1
+n = length(data)
+title = sprintf('Gene: %s  Num Samps: %g',genes[index], n )
+hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+
+```
+
+
+
+
+Save a few examples of genes with bias to investigate further
+
+```{r}
+
+#Get the sample index the gene is detected in, to link back up to the bam files later
+gene_index_func = function(gene_name, data, index){
+  present = data[data$name == gene_name, ]
+  if(nrow(present) >= 1){return(index)}
+  else(return(NA))
+}
+
+
+genes_of_interest = c('PIN4','IRAK1','KDM5C')
+
+
+for(i in 1:length(genes_of_interest)){
+
+  #Get a gene
+  goi_index = which(genes == genes_of_interest[i])
+  #Get the sample indices for that gene
+  temp_sample_index = unlist(lapply(not_skip, function(x) gene_index_func(genes[goi_index], final_filt.list.skew.max[[x]], x)))
+  temp_sample_index = temp_sample_index[!is.na(temp_sample_index)]
+  #Get the SNP expression info for that gene
+  temp_gene_df = data.frame(rbindlist(lapply(not_skip, function(x) gene_filt(genes[goi_index], final_filt.list.skew.max[[x]]))))
+  
+  #Rename colnames
+  colnames(temp_gene_df)[1:6] = c('snp_position','ref_counts','alt_counts','total_counts','ref_ratio','alt_ratio')
+  #Add the sample names to the dataframe
+  temp_gene_df$sample_id= as.character(files[temp_sample_index])
+  
+  #Save dataframe as text file
+  file_name = sprintf('/home/werner/xchrom_snp_skew/code/ref_biased_gene_examples/%s_snp_exp.txt', genes_of_interest[i])
+  write.csv(temp_gene_df , file = file_name, row.names = F)
+  #Find the SNP/s that's throwing the weird bias
+  par(las = 1, pty = 's')
+  pos = temp_gene_df$snp_position
+  ref_ratio = temp_gene_df$ref_ratio
+  plot_name = sprintf('/home/werner/xchrom_snp_skew/code/ref_biased_gene_examples/%s_snp_ref_exp_plot.pdf', genes_of_interest[i])
+  pdf(file = plot_name)
+  plot(ref_ratio, pos, main = genes_of_interest[i], cex.axis = .75)
+  dev.off()
+
+}
+```
+
+Figure out the exact SNPs causing problems
+
+```{r}
+
+
+#Get a gene
+goi_index = which(genes == 'KDM5C')
+#Get the sample indices for that gene
+temp_sample_index = unlist(lapply(not_skip, function(x) gene_index_func(genes[goi_index], final_filt.list.skew.max[[x]], x)))
+temp_sample_index = temp_sample_index[!is.na(temp_sample_index)]
+#Get the SNP expression info for that gene
+temp_gene_df = data.frame(rbindlist(lapply(not_skip, function(x) gene_filt(genes[goi_index], final_filt.list.skew.max[[x]]))))
+
+#Rename colnames
+colnames(temp_gene_df)[1:6] = c('snp_position','ref_counts','alt_counts','total_counts','ref_ratio','alt_ratio')
+#Add the sample names to the dataframe
+temp_gene_df$sample_id= as.character(files[temp_sample_index])
+
+par(las = 1, pty = 's')
+pos = temp_gene_df$snp_position
+ref_ratio = temp_gene_df$ref_ratio
+plot(ref_ratio, pos, cex.axis = .75)
+```
+
+```{r}
+temp_gene_df
+
+temp_df = temp_gene_df[temp_gene_df$snp_position == 53192267 & grepl('GTEX',temp_gene_df$sample_id), ]
+dim(temp_df)
+plot(temp_df$ref_ratio, temp_df$snp_position)
+
+```
+
+
+
+_______________________________________________________________________________________________________
+#########################################
+
+Gene filtering
+1.) looked at genes present in at least 30 samples
+2.) Ranked genes by the deviance of their mean skew from .5. .5 is expected
+3.) Just got rid of the top and bottom 5% of genes 
+4.) also excluded PIN4 cause it got weird SNPs
+
+
+#########################################
+
+
+
+
+
+```{r}
+
+#Get rid of the bimodal genes from the keep_gene list
+keep_genes = keep_genes[! keep_genes %in% bimodal_genes]
+length(keep_genes)
+
+bad_genes = genes[!genes %in% keep_genes]
+length(bad_genes)
+
+bad_genes
+
+```
+
+
+Also exclude known escape genes, going off of the Tukainen classifications, which were determined from the GTEx data
+
+```{r}
+tukiainen_escape_meta = read.table(file = '/home/werner/collabs/entex_Xchrom/code/tukiainen_study.txt', header = TRUE, sep = '\t')
+tukiainen_escape_meta = tukiainen_escape_meta[1:683, ] #Random row at the end
+tukiainen_escape_meta 
+table(tukiainen_escape_meta$Reported.XCI.status)
+
+escape_genes = as.character(tukiainen_escape_meta$Gene.name[as.character(tukiainen_escape_meta$Reported.XCI.status) == 'Escape'])
+
+#Look at their skew disributions
+escape_gene_skews = keep_genes[which(keep_genes %in% escape_genes)]
+index = genes %in% escape_gene_skews
+test = compiled_gene_data[index]
+test_names = genes[index]
+
+for(i in 1:length(test)){
+  data = test[[i]]$C.1
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',test_names[i], n )
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+}
+
+```
+
+And get rid of those escape genes
+
+```{r}
+#Get rid of the bimodal genes from the keep_gene list
+keep_genes = keep_genes[! keep_genes %in% escape_genes ]
+#But keep XIST because there's a strong expectation for its skew
+keep_genes = c(keep_genes, 'XIST')
+
+length(keep_genes)
+
+bad_genes = genes[!genes %in% keep_genes]
+length(bad_genes)
+
+bad_genes
+
+
+```
+
+
+
+
+
+
+
+```{r}
+bad_index = which(genes %in% bad_genes)
+
+for( i in bad_index){
+  data = compiled_gene_data[[i]]$C.1
+  
+  n = length(data)
+  title = sprintf('Gene: %s  Num Samps: %g',genes[i], n )
+  
+  hist(data, main=title, xlim = c(0,1), xlab = 'Ref / Total', breaks=50)
+  
+}
+
+```
+
+```{r}
+length(keep_genes)
+
+```
+
+
+
+
+Filtering out these SNPs from the dataset
+
+```{r}
+
+filt_bad_genes = function(dataframe){
+  
+  
+  gene_names = dataframe$name
+  gene_filt = !gene_names %in% bad_genes
+  
+  dataframe = dataframe[gene_filt, ]
+  return(dataframe)
+}
+
+final_filt.list.skew.max = lapply(final_filt.list.skew.max, filt_bad_genes)
+
+
+
+```
+
+
+Samples that are or are not null
+
+```{r}
+
+skip = c()
+
+
+for(i in 1:length(final_filt.list.skew.max)){
+  if(is.null(final_filt.list.skew.max[[i]])){skip = c(skip, i)}
+}
+
+length(skip)
+
+
+```
+
+```{r}
+num_snps_sample = vector(mode = 'numeric', length = length(final_filt.list.skew.max))
+
+for(i in 1:length(final_filt.list.skew.max)){
+  if(i %in% skip){num_snps_sample[i] = 0 ;next}
+  num_snps_sample[i] = dim(final_filt.list.skew.max[[i]])[1]
+}
+x = 1:length(final_filt.list.skew.max)
+num_snps_sample = num_snps_sample[order(num_snps_sample)]
+
+plot(x, num_snps_sample, main = 'Number of SNPs per sample for skew estimates')
+
+```
+
+
+Plot the total SNP ref ratio distributions with the ref skewed genes filtered out
+
+```{r}
+ref_ratios = vector(mode='numeric')
+counts = vector(mode='numeric')
+
+for(i in 1:length(final_filt.list.skew.max)){
+  
+  if(i %in% skip){next}
+  
+  ref_ratios_1 = final_filt.list.skew.max[[i]]$C.1
+  ref_ratios = c(ref_ratios, ref_ratios_1)
+  counts_1 = final_filt.list.skew.max[[i]]$A.1
+  counts = c(counts, counts_1)
+  
+  
+}
+
+
+mod_df = data.frame(ref_ratios = ref_ratios, tot_counts = counts)
+
+
+mod_ratios_p = ggplot(mod_df, aes(ref_ratios, log10(tot_counts))) + geom_point(alpha=1/8,size=1) + ylab('log SNP reads') + xlab('SNP ref/total ratio') + ggtitle('SNP ratios vs Reads: after filtering ref biased genes') + 
+  theme(plot.title=element_text(hjust=.5, size=14), axis.title.x = element_text(size=14), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=14), axis.text.y = element_text(size=12)) + 
+  geom_vline(xintercept=.5, color='red')
+ggMarginal(mod_ratios_p, type='density',fill = '#752A8C')
+
+ggsave(filename='all_called_snps_after_ref_bias_and_highly_expressed_filtering_v8.pdf', device='pdf', 
+path = '/home/werner/xchrom_snp_skew/code/graphs/summary_graphs', units='in', height=5, width=7, dpi=300, useDingbats = FALSE)
+
+```
+
+
+
+
+
+
+
+
+Skew modeling
+
+
+
+```{r}
+
+
+# Functions to fold and unfold ratios 
+folded <- function(x) { apply( cbind(x,1-x), 1, max)} 
+unfold <- function(x) { c(x,1-x) } 
+
+#Sara's MLE function
+# Maximum likelihood estimate function. Note, x is a global variable! Should fix but this lets me use it in the bootstrap later.  
+mle_folded <- function(x){ 
+  mus = seq(0.5,1, by = 0.001)
+  sigmas = seq(0,0.5, by = 0.01)
+  
+  mles = sapply(mus, function(mu)
+    sapply(sigmas, function(sigma)
+      -sum( log(dnorm( x,   mean = mu, sd = sigma )
+                + dnorm( x,   mean = 1-mu, sd = sigma ) )  )))
+  mles[!is.finite(mles)] = NA
+  coefs = which(mles==min(mles, na.rm=T), arr.ind=T)
+  return (list( mus[coefs[2]] , sigmas[coefs[1]]))
+} 
+
+```
+
+
+
+
+
+Need list.skew.max
+Need Ns (number of SNPs)
+Need ratios.max
+
+
+```{r}
+Ns = vector(mode='numeric', length = length(final_filt.list.skew.max))
+
+for(i in 1:length(final_filt.list.skew.max)){
+  
+  if(is.null(final_filt.list.skew.max[[i]])){Ns[i] = 0}
+  else{Ns[i] = dim(final_filt.list.skew.max[[i]])[1]}
+  
+}
+
+```
+
+```{r}
+
+ratios.max = list()
+for(i in 1: length(final_filt.list.skew.max)){
+  
+  if(Ns[i] == 0){next}
+  ratios.max[[i]] = final_filt.list.skew.max[[i]][ ,c('C.1', 'G')]  
+
+}
+
+head(ratios.max)
+
+```
+
+
+```{r}
+
+
+list.skew.max = final_filt.list.skew.max
+
+
+```
+
+
+
+
+Parrelized version, speeds it up ridicoulously wel
+
+```{r}
+
+est_skew_func = function(list.skew.max, Ns, ratios.max){
+  
+  #If there's only 1 or 0 SNPs, don't estimate a skew
+  if(Ns <= 0){return(NA)}
+  #Fold the reference skews
+  folded_ref_skews = folded(ratios.max$C.1)
+  #return the mean and sigma estimates
+  return(mle_folded(folded_ref_skews))
+}
+
+```
+
+
+```{r}
+
+Sys.time()
+folded_norm_fits = mclapply(1:length(list.skew.max), function(i) est_skew_func(list.skew.max[[i]], Ns[i], ratios.max[[i]]), mc.cores = 20)
+Sys.time()
+
+
+#Grab the skew and variance estimates
+est_skew = vector(mode = 'numeric', length = length(folded_norm_fits))
+est_var = vector(mode = 'numeric', length = length(folded_norm_fits))
+for(i in 1:length(folded_norm_fits)){
+  
+  if(is.na(folded_norm_fits[i])){
+    est_skew[i] = NA
+    est_var[i] = NA
+    next
+  }
+  
+  est_skew[i] = folded_norm_fits[[i]][[1]]
+  est_var[i] = folded_norm_fits[[i]][[2]]
+}
+
+```
+
+```{r}
+
+hist(est_skew, main = 'Skew estimates filtering out Ref skewed, bimodal, and escape genes', breaks=64)
+hist(est_var, main = 'Updated variance estimates', breaks = 32)
+plot(est_skew, est_var)
+
+
+
+```
+
+
+
+
+
+
+```{r}
+table(Ns >= 10)
+
+
+```
+
+
+
+```{r}
+temp = Ns[order(Ns)]
+x = 1:length(Ns)
+plot(x, temp, main = 'Number of SNPs in each sample', xlab = 'Sample index', ylab = 'Num filtered SNPs')
+```
+
+
+
+
+Look at XIST skews to the skew of the sample
+```{r}
+
+xist_skew = vector(mode = 'numeric', length = length(list.skew.max))
+xist_exp = vector(mode = 'numeric', length = length(list.skew.max))
+
+for(i in 1:length(list.skew.max)){
+  
+  xist_index = as.character(list.skew.max[[i]]$name) == 'XIST'
+  if(sum(xist_index)==0){xist_skew[i] = NA; xist_exp[i] = NA; next}
+  xist_skew[i] = list.skew.max[[i]]$C.1[xist_index]
+  xist_exp[i] = list.skew.max[[i]]$A.1[xist_index]
+}
+
+
+xist_present_index = which(!is.na(xist_skew))
+plot(est_skew[xist_present_index], xist_skew[xist_present_index], xlim = c(.5,1), xlab = 'Folded estimated tissue skew', ylim = c(0,1), ylab = 'Unfolded XIST reference skew',
+     main = 'Samples with detected het XIST SNPs')
+
+plot(folded(xist_skew[xist_present_index]), xist_exp[xist_present_index],xlim = c(0,1), xlab = ' XIST skew', ylab = 'XIST expression' )
+
+
+xist_skew = folded(xist_skew)
+par(pty='s')
+plot(est_skew[xist_present_index], xist_skew[xist_present_index], xlim = c(.5,1), xlab = 'Folded estimated tissue skew', ylim = c(.5,1), ylab = 'Folded XIST skews',
+     main = 'Samples with detected het XIST SNPs', cex=.5)
+abline(a=0, b=1, col='red')
+
+skew_deviance = est_skew[xist_present_index] - xist_skew[xist_present_index]
+plot(skew_deviance, xist_exp[xist_present_index] , xlab = 'XIST skew deviance from donor skew')
+
+```
+
+```{r}
+table(!is.na(xist_skew))
+
+```
+
+
+
+
+
+
+############################
+Saving the final filtered dataset
+############################
+
+```{r}
+#save(list.skew.max, Ns, ratios.max, file = "/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v7_GATK_final_filt_2.skew.est.max.genes.Rdata")
+
+```
+
+
+
+Dataset after fixing the annotation and SNP filtering bugs
+```{r}
+save(list.skew.max, Ns, ratios.max, file = "/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_1_20_2021_update_filt_escape.skew.est.max.genes.Rdata")
+#"/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v7_GATK_11_5_2020_update_filt_escape.skew.est.max.genes.Rdata")
+```
+
+
+```{r}
+load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_1_20_2021_update_filt_escape.skew.est.max.genes.Rdata")
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v7_GATK_11_5_2020_update_filt_escape.skew.est.max.genes.Rdata")
+
+```
+
+
+
+```{r}
+
+head(list.skew.max)
+
+```
+
+
+
+
+
+Looking at actual SNP distributions
+
+```{r}
+
+test_index = which(est_skew >= .5 & est_skew<= .51)
+length(test_index)
+for(i in test_index){
+  sample = list.skew.max[[i]]
+  folded_skews = folded(sample$C.1)
+  title = sprintf('Skew estimate: %f',est_skew[i] )
+  hist(folded_skews, breaks=16, xlim = c(.5,1), main = title)
+  abline(v =est_skew[i], col='red' )
+}
+```
+
+
+
+#########################################################
+Tesing gene skew correlations to tissue estimated skew
+Go Through the list of genes in the data set, 
+pull out the gene skew distribution, 
+generate skew estimates without that gene,
+grab the correlation between the two in folded space
+
+Seeing which genes follow the skew of the tissue, especially looking at XIST
+Can we use XIST as the skew estimate for the .5-.6 skewed tissues?
+#########################################################
+
+
+Also do a permutation test to get a pvalue for the correlation
+```{r}
+cor_permute = function(x,y){
+  permute_y = sample(y,size=length(y), replace=FALSE)
+  corr = suppressWarnings(cor(x,permute_y, method='pearson'))
+  return(corr)
+}
+
+```
+
+
+```{r}
+length(keep_genes)
+
+```
+
+```{r}
+head(list.skew.max)
+
+```
+
+
+
+```{r}
+
+num_permutes = 10000  #For correlation permutation test
+
+gene_skew_correlations = vector(mode = 'numeric', length = length(keep_genes))
+names(gene_skew_correlations) = keep_genes
+gene_skew_cor_pvalues = vector(mode = 'numeric', length = length(keep_genes))
+names(gene_skew_cor_pvalues) = keep_genes
+gene_skew_num_samps = vector(mode = 'numeric', length = length(keep_genes))
+names(gene_skew_num_samps) = keep_genes
+
+
+for(j in 1:length(keep_genes)){
+
+  
+  current_gene = keep_genes[j]
+  
+  #Go through the data, and get the index of samples that detect that gene and the reference skew for that gene
+  re_gene_ref_skew = c()
+  sample_index_for_gene= c()
+  for(i in 1:length(list.skew.max)){
+    
+    data = list.skew.max[[i]]
+    present = data$name == current_gene
+    if(sum(present) == 0) #If detected in that sample, grab the sample index and the gene skew
+      {next} else{
+        sample_index_for_gene = c(sample_index_for_gene, i)
+        re_gene_ref_skew = c(re_gene_ref_skew ,data[present, 'C.1'])
+    }
+  }
+  
+  
+  #Just looking at the samples that detect that gene, filter it out and redo the skew estimates
+  temp.list.skew.max = list.skew.max[sample_index_for_gene]
+  #Filter out the gene
+  bad_genes = current_gene  #For the filtering out function, i used a global variable, not smart
+  temp.list.skew.max = lapply(temp.list.skew.max, filt_bad_genes)
+  
+  #Redo the ratios.max and the Ns objects
+  temp.Ns = vector(mode='numeric', length = length(temp.list.skew.max))
+  for(i in 1:length(temp.list.skew.max)){
+    if(is.null(temp.list.skew.max[[i]])){temp.Ns[i] = 0}
+    else{temp.Ns[i] = dim(temp.list.skew.max[[i]])[1]}
+  }
+  
+  temp.ratios.max = list()
+  for(i in 1: length(temp.list.skew.max)){
+    if(temp.Ns[i] == 0){next}
+    temp.ratios.max[[i]] = temp.list.skew.max[[i]][ ,c('C.1', 'G')]  
+  }
+  
+  
+  #Get the skew estimates
+  temp_folded_norm_fits = mclapply(1:length(temp.list.skew.max), function(i) est_skew_func(temp.list.skew.max[[i]], temp.Ns[i], temp.ratios.max[[i]]), mc.cores = 20)
+  
+  #Grab the skew and variance estimates
+  temp_est_skew = vector(mode = 'numeric', length = length(temp_folded_norm_fits))
+  for(i in 1:length(temp_folded_norm_fits)){
+    if(is.na(temp_folded_norm_fits[i])){
+      temp_est_skew[i] = NA
+      next
+    }
+    temp_est_skew[i] = temp_folded_norm_fits[[i]][[1]]
+  }
+  
+  
+  #Exclude NA cases, where the sample did not get a skew estimate
+  na_index = !is.na(temp_est_skew)
+  temp_est_skew = temp_est_skew[na_index]
+  re_gene_ref_skew = re_gene_ref_skew[na_index]
+  
+  
+  original_cor = cor(temp_est_skew, folded(re_gene_ref_skew), method = 'pearson')
+  permute_cors = unlist(mclapply(1:num_permutes, function(i) cor_permute(temp_est_skew, folded(re_gene_ref_skew)), mc.cores=5))
+  corr_pvalue = sum(abs(permute_cors) > abs(original_cor) ) / num_permutes
+  
+  gene_skew_correlations[j] = original_cor
+  gene_skew_cor_pvalues[j] = corr_pvalue
+  gene_skew_num_samps[j] = length(temp_est_skew)
+  print(sprintf('Finished %s, correlation: %0.3f  pvalue; %0.5f num samps: %i finished %i genes at %s', 
+                current_gene, original_cor, corr_pvalue,length(temp_est_skew), j, Sys.time()))
+
+}
+
+```
+
+
+```{r}
+length(gene_skew_correlations)
+
+```
+
+
+
+```{r}
+hist(gene_skew_correlations[gene_skew_num_samps >= 30], breaks = 32, xlab = 'All correlations with >= 30 samples', main = 'Gene skew to tissue skew correlations')
+hist(gene_skew_cor_pvalues, main = 'permutation test p-values uncorrected', breaks = 32)
+hist(p.adjust(gene_skew_cor_pvalues, method = 'BH'), main = 'permutation test p-values corrected', breaks = 32)
+corrected_correlation_pvalues = p.adjust(gene_skew_cor_pvalues, method = 'BH')
+hist(gene_skew_correlations[corrected_correlation_pvalues <= .05 & gene_skew_num_samps >= 30], 
+     main = 'Gene skew to tissue skew correlations',xlab='Correlations with pval <= .05 and >= 30 samples',
+     breaks = 32, xlim = c(0,1))
+
+
+plot(gene_skew_num_samps[corrected_correlation_pvalues <= .05 & gene_skew_num_samps >= 30] , 
+     gene_skew_correlations[corrected_correlation_pvalues <= .05 & gene_skew_num_samps >= 30], 
+     main = 'Sample size versus correlation',ylab='Correlations with pval <= .05 and >= 30 samples', xlab = 'Sample size',ylim = c(0,1))
+
+
+
+```
+
+```{r}
+filt_correlations = gene_skew_correlations[corrected_correlation_pvalues <= .05 & gene_skew_num_samps >= 30]
+filt_correlations = filt_correlations[order(filt_correlations, decreasing = FALSE)]
+index = which(names(filt_correlations) %in% c('XIST', 'TSIX', 'AR'))
+
+
+x = 1:length(filt_correlations)
+plot(x,filt_correlations, xlab = 'Gene rank', ylab = 'Pearson correlation', main = 'Gene skew correlations to tissue skew', ylim = c(0,1))
+text(x[index], filt_correlations[index], labels = names(filt_correlations)[index], cex=.8, pos=3)
+
+
+top_genes = filt_correlations[filt_correlations >=.8]
+x = 1:length(top_genes)
+
+barplot(top_genes,names = names(top_genes), ylab = 'Pearson correlation', main = "Genes with high correlations to tissue skew",
+        col='grey', las=2, cex.names=.8, ylim = c(0,1))
+
+
+#barp = barplot(tissue_auc_donor_mean_skew_df$auc_70[index] , names = tissue_auc_donor_mean_skew_df $tissue[index], main = 'Tissue AUC for predicting mean donor skew (positives >= .70)', ylab = 'AUC', las=2, col = 'grey', cex.names=.65, ylim = c(0,1))
+#abline(h=.5, col = 'red')
+
+
+```
+
+
+
+Now look at the expression of those genes, what's most likely the explaining variable in correlation is the expression, higher expressed genes are better correlated with tissue skew
+
+
+```{r}
+
+keep_genes_expression_list = list()
+for(j in 1:length(keep_genes)){
+
+  
+  current_gene = keep_genes[j]
+  gene_expression = c()
+  #Go through the dataset and get the total expression of each gene in the samples it's detected in
+  for(i in 1:length(list.skew.max)){
+    
+    data = list.skew.max[[i]]
+    present = data$name == current_gene
+    if(sum(present) == 0) #If detected in that sample, grab the sample index and the gene skew
+      {next} else{
+        gene_expression = c(gene_expression ,data[present, 'A.1'])
+    }
+  }
+  
+  keep_genes_expression_list[[j]] = gene_expression
+}
+
+names(keep_genes_expression_list) = keep_genes
+```
+
+
+
+
+Get the average expression, can also plot the whole distributions if I want, starting simple
+```{r}
+
+mean_expression_keep_genes = unlist(lapply(keep_genes_expression_list, mean))
+
+
+```
+
+```{r}
+table(corrected_correlation_pvalues>=.10 & gene_skew_num_samps >= 1000 )
+
+```
+
+```{r}
+table(names(gene_skew_num_samps) == keep_genes)
+
+```
+
+
+
+Make a dataframe with the data for ggploting
+```{r}
+
+
+
+gene_skew_corr_df = data.frame(gene_name = keep_genes, correlation_to_tissue_skew = gene_skew_correlations, pvalue =gene_skew_cor_pvalues, 
+                               corrected_pvalue = corrected_correlation_pvalues, avg_expression =mean_expression_keep_genes,  num_samples = gene_skew_num_samps)
+
+gene_skew_corr_df[gene_skew_corr_df$correlation_to_tissue_skew >= .8 & gene_skew_corr_df$num_samples >= 100, ]
+
+```
+
+
+
+plot some examples for gene skew to tissue skew correlation
+kind of well correlated MECP2
+well correlated TCEAL3
+poorlly correlated SHROOM4
+
+```{r}
+
+
+current_gene = 'SHROOM4'
+
+#Go through the data, and get the index of samples that detect that gene and the reference skew for that gene
+re_gene_ref_skew = c()
+sample_index_for_gene= c()
+for(i in 1:length(list.skew.max)){
+  
+  data = list.skew.max[[i]]
+  present = data$name == current_gene
+  if(sum(present) == 0) #If detected in that sample, grab the sample index and the gene skew
+    {next} else{
+      sample_index_for_gene = c(sample_index_for_gene, i)
+      re_gene_ref_skew = c(re_gene_ref_skew ,data[present, 'C.1'])
+  }
+}
+
+#Just looking at the samples that detect that gene, filter it out and redo the skew estimates
+temp.list.skew.max = list.skew.max[sample_index_for_gene]
+#Filter out the gene
+bad_genes = current_gene  #For the filtering out function, i used a global variable, not smart
+temp.list.skew.max = lapply(temp.list.skew.max, filt_bad_genes)
+
+#Redo the ratios.max and the Ns objects
+temp.Ns = vector(mode='numeric', length = length(temp.list.skew.max))
+for(i in 1:length(temp.list.skew.max)){
+  if(is.null(temp.list.skew.max[[i]])){temp.Ns[i] = 0}
+  else{temp.Ns[i] = dim(temp.list.skew.max[[i]])[1]}
+}
+
+temp.ratios.max = list()
+for(i in 1: length(temp.list.skew.max)){
+  if(temp.Ns[i] == 0){next}
+  temp.ratios.max[[i]] = temp.list.skew.max[[i]][ ,c('C.1', 'G')]  
+}
+
+
+#Get the skew estimates
+temp_folded_norm_fits = mclapply(1:length(temp.list.skew.max), function(i) est_skew_func(temp.list.skew.max[[i]], temp.Ns[i], temp.ratios.max[[i]]), mc.cores = 20)
+
+#Grab the skew and variance estimates
+temp_est_skew = vector(mode = 'numeric', length = length(temp_folded_norm_fits))
+for(i in 1:length(temp_folded_norm_fits)){
+  if(is.na(temp_folded_norm_fits[i])){
+    temp_est_skew[i] = NA
+    next
+  }
+  temp_est_skew[i] = temp_folded_norm_fits[[i]][[1]]
+}
+
+#Exclude NA cases, where the sample did not get a skew estimate
+na_index = !is.na(temp_est_skew)
+temp_est_skew = temp_est_skew[na_index]
+re_gene_ref_skew = re_gene_ref_skew[na_index]
+
+
+original_cor = cor(temp_est_skew, folded(re_gene_ref_skew), method = 'pearson')
+```
+
+
+```{r}
+file_name = sprintf('/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/%s_gene_skew_to_tissue_skew_ex.pdf', current_gene)
+pdf(file = file_name , height = 4, width = 4, useDingbats = FALSE)
+par(pty = 's')
+plot(temp_est_skew,folded(re_gene_ref_skew), xlim = c(.5,1), ylim = c(.5,1), main = sprintf('%s: correlation %0.3f',current_gene, original_cor), 
+     xlab = 'Tissue XCI skew', ylab = 'Gene XCI skew', cex = .5, pch = 19 )
+
+dev.off()
+
+par(pty = 's')
+plot(temp_est_skew,folded(re_gene_ref_skew), xlim = c(.5,1), ylim = c(.5,1), main = sprintf('%s: correlation %0.3f',current_gene, original_cor), 
+     xlab = 'Tissue XCI skew', ylab = 'Gene XCI skew', cex = .5, pch = 19 )
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+save only significant and well powered correlations/genes
+```{r}
+
+index = corrected_correlation_pvalues <= .05 & gene_skew_num_samps >= 30
+gene_skew_corr_df = gene_skew_corr_df[index, ]
+gene_skew_corr_df = gene_skew_corr_df[order(gene_skew_corr_df$correlation_to_tissue_skew), ]
+
+gene_skew_corr_df$skew_rank = 1:(dim(gene_skew_corr_df)[1])
+
+dim(gene_skew_corr_df)
+head(gene_skew_corr_df)
+```
+
+
+
+
+Replot above but with better aesthetics
+```{r}
+
+annotation_data = gene_skew_corr_df[gene_skew_corr_df$gene_name %in% c('XIST', 'TSIX', 'AR'), ]
+
+ggplot(gene_skew_corr_df, aes(x = skew_rank, y = correlation_to_tissue_skew)) + geom_jitter(size = 1,alpha = .5, width = 0.01, height = 0.01) + 
+  ylim(0,1) + ylab('Similarity between gene and tissue skew (corr)') + xlab('Genes detected in at least 30 samples') +
+  ggtitle('Correlation of gene and tissue skews') +
+  geom_point(data = annotation_data, aes(x = skew_rank, y = correlation_to_tissue_skew, col = 'red'), size = 3) + 
+  geom_label_repel(data = annotation_data, aes(label = gene_name), size = 4, nudge_y = .1) +
+  theme(plot.title = element_text(hjust = .5), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), 
+        axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12), 
+        legend.position = 'none', panel.background = element_rect(fill = 'white')) 
+#ggsave(filename = 'ranked_gene_skew_to_tissue_skew_correlation.pdf', path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/', device = 'pdf', 
+#       dpi = 300, height = 4, width = 6, useDingbats = FALSE)
+
+
+ggplot(gene_skew_corr_df, aes(x = avg_expression, y = correlation_to_tissue_skew)) + geom_point(alpha = .5) +
+  ylim(0,1) + ylab('Gene-Tissue skew correlation') + xlab('Average expression') + ggtitle('Higher expression increases gene-tissue skew correlation') +
+  geom_point(data = annotation_data, aes(x = avg_expression, y = correlation_to_tissue_skew, col = 'red')) + 
+  geom_label_repel(data = annotation_data, aes(label = gene_name), size = 4, nudge_y = .1, nudge_x = .1) +
+  theme(plot.title = element_text(hjust = .5), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), 
+        axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12), legend.position = 'none')
+```
+
+```{r}
+gene_skew_corr_df
+
+```
+
+
+plot somme examples for gene skew to tissue skew correlation
+kind of well correlated MECP2
+well correlated
+poorlly correlated RAP2C
+
+```{r}
+
+
+
+```
+
+
+
+
+
+
+
+
+And now using the EGAD code for the proper convolution smoothing, making some minor changes 
+
+```{r}
+#Contains the conv_smoother() function
+source('/home/werner/tools/analysis_R_scripts/conv_smoother.R')
+```
+
+```{r}
+
+#Modifying it to show two SDs around the average
+conv_smoother <- function(X, Y, window, raw = FALSE, output=FALSE, ...) {
+    filt <- is.finite(X) & is.finite(Y) & !is.na(X) & !is.na(Y)
+    X <- X[filt]
+    Y <- Y[filt]
+    
+    n <- order(X)
+    m <- X[n]
+    i <- length(m)/window
+    
+    ymax <- max(Y)
+    ymin <- min(Y)
+    xmax <- max(X)
+    xmin <- min(X)
+    X_c = m
+    X_c = X_c[(window/2):(length(m) - (window/2))] 
+    #X_c <- m[(((1:i) * window) - window/2)]
+    Y_c <- convolve(Y[n], rep(1, window)/window, type = "filter")
+    #Y_c <- Y_c[(1:i) * window - (window - 1)]
+    
+    var_Y_c <- abs(convolve(Y[n]^2, rep(1, window)/window, type = "filter") - (convolve(Y[n], rep(1, 
+        window)/window, type = "filter"))^2)
+    std_Y_c <- var_Y_c^(1/2)
+    #std_Y_c <- std_Y_c[(1:i) * window - (window - 1)]
+    
+    plot(X_c, Y_c, ylim = c(0,1), xlim = c(xmin, xmax), pch=19, cex = 1, ...)
+    
+    polygon(c(X_c, rev(X_c)), c(Y_c - std_Y_c, rev(Y_c + std_Y_c)), col = adjustcolor("grey",alpha.f=0.85) , border = 'blue',lwd = 2,  ...)
+    polygon(c(X_c, rev(X_c)), c(Y_c - (2*std_Y_c), rev(Y_c + (2*std_Y_c))), col = adjustcolor("grey",alpha.f=0.5) , border = 'red3', lwd = 1, ...)
+    points(X_c, Y_c, pch=19, cex = 1) #Redo the points to go on top of the polygons
+    
+    if (raw == TRUE) {
+        points(X, Y, pch = 19, cex = 0.1)
+    }
+    
+    lines(X_c, Y_c, col = 1, lwd = 2)
+    smoothed <- cbind(X_c, Y_c, std_Y_c)
+    if(output==TRUE){ 
+        return(smoothed)
+    }
+}
+
+
+```
+
+
+```{r}
+#Grab the data first
+x = log10(gene_skew_corr_df$avg_expression)
+y = gene_skew_corr_df$correlation_to_tissue_skew
+
+#Order on the x axis
+ordered_y = y[order(x)]
+
+convolved_gene_skew_exp = conv_smoother(x,y, window = 25, raw = TRUE, output = TRUE, xlab = 'log10(exp)', ylab = 'Gene-tissue skew correlation', main = 'Using EGAD default code')
+
+X_c = convolved_gene_skew_exp[, 'X_c']
+Y_c = convolved_gene_skew_exp[, 'Y_c']
+std_Y_c = convolved_gene_skew_exp[, 'std_Y_c']
+
+#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/convolved_gene_expression_to_skew.pdf', useDingbats = FALSE)
+#Raw data
+plot(x, y, pch = 19, cex = 0.4, col = 'grey30', ylim = c(0,1.1), xlim = c(min(x), max(x)), 
+     xlab = 'log10( Average gene expression )', ylab = 'Similarity between gene and tissue skew (corr)', main = 'Gene-tissue skew correlations trend with expression levels')
+#Standard deviations and moving average
+polygon(c(X_c, rev(X_c)), c(Y_c - std_Y_c, rev(Y_c + std_Y_c)), col = adjustcolor("grey",alpha.f=0.5) , border = 'black',lwd = 2)
+polygon(c(X_c, rev(X_c)), c(Y_c - (2*std_Y_c), rev(Y_c + (2*std_Y_c))), col = adjustcolor("grey",alpha.f=0.25) , border = 'black', lwd = 2)
+lines(X_c, Y_c, col = 1, lwd = 3)
+
+#dev.off()
+
+
+
+```
+
+```{r}
+gene_skew_corr_df
+
+
+```
+
+
+
+Pull out the genes that do not follow the trend
+
+```{r}
+window = 25
+convolve_index = floor((window/2):(length(x) - (window/2)))
+row_ind = ordered_y[convolve_index] < (Y_c - (2*std_Y_c))
+ordered_x = x[order(x)]
+bad_x = ordered_x[convolve_index][row_ind]
+bad_y = ordered_y[convolve_index][row_ind]
+
+
+#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/convolved_gene_expression_to_skew_with_outliers.pdf', useDingbats = FALSE)
+plot(x, y, pch = 19, cex = 0.4, col = 'grey30', ylim = c(0,1.1), xlim = c(min(x), max(x)), 
+     xlab = 'log10( Average gene expression )', ylab = 'Gene and tissue skew correlation', main = 'Gene-tissue skew correlations trend with expression levels')
+#Standard deviations and moving average
+polygon(c(X_c, rev(X_c)), c(Y_c - std_Y_c, rev(Y_c + std_Y_c)), col = adjustcolor("grey",alpha.f=0.5) , border = 'black',lwd = 2)
+polygon(c(X_c, rev(X_c)), c(Y_c - (2*std_Y_c), rev(Y_c + (2*std_Y_c))), col = adjustcolor("grey",alpha.f=0.25) , border = 'black', lwd = 2)
+lines(X_c, Y_c, col = 1, lwd = 3)
+
+#Check i got the right genes
+points(bad_x, bad_y, col = 'red3', pch = 19)
+#dev.off()
+
+```
+
+
+Or plot the z_scored values, highlight the outliers
+
+```{r}
+
+zscored_convolved_corrs = (ordered_y[convolve_index] - Y_c) / std_Y_c
+hist(zscored_convolved_corrs)
+
+plot(zscored_convolved_corrs,ordered_y[convolve_index] )
+
+```
+
+```{r}
+gene_skew_corr_df
+```
+
+
+A more aesthetically pleasing approach, bin the expression and plot the correlations as box plots
+
+```{r}
+#Order by log10(avg_expression) for binning
+temp_gene_df = gene_skew_corr_df
+temp_gene_df$avg_expression = log10(temp_gene_df$avg_expression)
+temp_gene_df = temp_gene_df[order(temp_gene_df$avg_expression), ]
+num_samps = dim(temp_gene_df)[1]
+num_bins = 5
+num_samps_in_bin = num_samps / num_bins 
+
+labels = rep('Binned expression 1', num_samps)
+for( i in 1:(num_bins-1)){
+  labels[((i*num_samps_in_bin) + 1): ((i+1)*num_samps_in_bin)] = sprintf('Binned expression %i', i+1)
+}
+
+temp_gene_df$label = labels
+
+
+ggplot(temp_gene_df, aes(x = label, y = correlation_to_tissue_skew)) + geom_boxplot()+
+  ylab('Similarity between gene and tissue skew (corr)') + ylim(0,1) +
+  theme(plot.title=element_text(hjust=.5, size=15), 
+        axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
+        axis.text.x=element_blank(),axis.title.x=element_blank(),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        panel.background = element_rect(fill = 'white'))
+#ggsave(path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/', filename = 'gene_skew_to_tissue_skew_binned_boxplots.pdf', device = 'pdf', 
+#       dpi = 300, width = 4, height = 4, units = 'in', useDingbats = FALSE)
+
+
+```
+
+
+
+```{r}
+index = temp_gene_df$label == 'Binned expression 5'
+plot(temp_gene_df$avg_expression[index], temp_gene_df$correlation_to_tissue_skew[index])
+
+```
+
+
+Grab the outliers from the box plot
+```{r}
+is_outlier <- function(x) {
+  return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x))
+}
+
+boxplots = unique(temp_gene_df$label)
+all_outliers = c()
+for(i in 1:length(boxplots)){
+  
+  #Get correlations for that boxplot
+  corrs = temp_gene_df$correlation_to_tissue_skew[temp_gene_df$label == boxplots[i]]
+  outlier_index = is_outlier(corrs)
+  outlier_genes = as.character(temp_gene_df$gene_name[temp_gene_df$label == boxplots[i]][outlier_index])
+  all_outliers = c(all_outliers, outlier_genes)
+  
+}
+
+all_outliers
+
+```
+
+
+And the genes that do noot follow the trend are....
+Go through the dataset for each gene and get it's skew and the estimated tissue skew withholding it, plot against to see if there's a trend
+
+```{r}
+#Outliers based on convolution method
+#poor_skew_corr_genes = as.character(gene_skew_corr_df[order(gene_skew_corr_df$avg_expression), 'gene_name'][convolve_index][row_ind])
+
+#Outliers based on boxplot bins
+poor_skew_corr_genes = all_outliers
+gene_skews = c()
+est_tissue_skews = c()
+gene_name = c()
+sample_index = c()
+
+
+for(j in 1:length(poor_skew_corr_genes)){
+  
+  current_gene = poor_skew_corr_genes[j]
+  
+  #Go through the data, and get the index of samples that detect that gene
+  sample_index_for_gene= c()
+  gene_ref_skew = c()
+  for(i in 1:length(list.skew.max)){
+    data = list.skew.max[[i]]
+    present = data$name == current_gene
+    if(sum(present) == 0) #If detected in that sample, grab the sample index and the gene skew
+      {next} else{
+        sample_index_for_gene = c(sample_index_for_gene, i)
+        #Grab that sample's gene skew for this gene
+        gene_ref_skew = c(gene_ref_skew , data[present, 'C.1'])
+    }
+  }
+  
+  #Just looking at the samples that detect that gene, filter it out and redo the skew estimates
+  temp.list.skew.max = list.skew.max[sample_index_for_gene]
+
+  #Filter out the gene
+  bad_genes = current_gene  #For the filtering out function, i used a global variable, not smart
+  temp.list.skew.max = lapply(temp.list.skew.max, filt_bad_genes)
+  
+  #Redo the ratios.max and the Ns objects
+  temp.Ns = vector(mode='numeric', length = length(temp.list.skew.max))
+  for(i in 1:length(temp.list.skew.max)){
+    if(is.null(temp.list.skew.max[[i]])){temp.Ns[i] = 0}
+    else{temp.Ns[i] = dim(temp.list.skew.max[[i]])[1]}
+  }
+  
+  temp.ratios.max = list()
+  for(i in 1: length(temp.list.skew.max)){
+    if(temp.Ns[i] == 0){next}
+    temp.ratios.max[[i]] = temp.list.skew.max[[i]][ ,c('C.1', 'G')]  
+  }
+  
+  #Get the skew estimates
+  temp_folded_norm_fits = mclapply(1:length(temp.list.skew.max), function(i) est_skew_func(temp.list.skew.max[[i]], temp.Ns[i], temp.ratios.max[[i]]), mc.cores = 20)
+  
+  #Grab the skew and variance estimates
+  temp_est_skew = vector(mode = 'numeric', length = length(temp_folded_norm_fits))
+  for(i in 1:length(temp_folded_norm_fits)){
+    if(is.na(temp_folded_norm_fits[i])){
+      temp_est_skew[i] = NA
+      next
+    }
+    temp_est_skew[i] = temp_folded_norm_fits[[i]][[1]]
+  }
+  
+  
+  #Exclude NA cases, where the sample did not get a skew estimate
+  na_index = !is.na(temp_est_skew)
+  temp_est_skew = temp_est_skew[na_index]
+  gene_ref_skew = gene_ref_skew[na_index]
+  sample_index_for_gene = sample_index_for_gene[na_index]
+  
+  #Add to a total data frame
+  gene_skews = c(gene_skews,gene_ref_skew)
+  est_tissue_skews = c(est_tissue_skews,temp_est_skew )
+  sample_index = c(sample_index, sample_index_for_gene)
+  labels = rep(current_gene, length(gene_ref_skew) )
+  gene_name = c(gene_name, labels)
+  
+  
+  print(sprintf('Finished %s at %s', 
+                current_gene,  Sys.time()))
+
+}
+
+bad_gene_skew_df = data.frame(gene_skews = gene_skews, estimated_tissue_skews = est_tissue_skews, gene_name = gene_name, sample_index = sample_index)
+bad_gene_skew_df
+```
+
+
+Plot the gene and tissue skews against each other
+
+
+```{r}
+for( i in 1:length(poor_skew_corr_genes)){
+  current_gene = poor_skew_corr_genes[i]
+  
+  gene_skews = bad_gene_skew_df$gene_skews[bad_gene_skew_df$gene_name == current_gene]
+  tissue_skews = bad_gene_skew_df$estimated_tissue_skews[bad_gene_skew_df$gene_name == current_gene]
+  title = sprintf('%s tissue vs gene skew', current_gene)
+  par(pty = 's')
+  plot(tissue_skews, gene_skews, main = title, xlim = c(.5, 1), ylim = c(.5, 1))
+  abline(a = 0, b = 1, col = 'red')
+}
+
+```
+
+```{r}
+
+
+```
+
+
+
+Save the correlation results and the keep_genes and genes objects so I don't have to keep redoing this
+```{r}
+save(genes, keep_genes, gene_skew_correlations, gene_skew_cor_pvalues, gene_skew_num_samps, bad_gene_skew_df, gene_skew_corr_df,
+     file = '/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/gene_skew_to_tissue_skew_correlations_v8.Rdata'  )
+
+```
+
+
+Get a plot of the Xchrome positions for the final list of genes used
+```{r}
+
+load('/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/gene_skew_to_tissue_skew_correlations_v8.Rdata')
+
+```
+
+Using the karyoploteR package
+```{r}
+
+library(karyoploteR)
+```
+
+
+
+```{r}
+
+filt_correlations = gene_skew_correlations[corrected_correlation_pvalues <= .05 & gene_skew_num_samps >= 30]
+filt_correlations = filt_correlations[order(filt_correlations, decreasing = FALSE)]
+index = which(names(filt_correlations) %in% c('XIST', 'TSIX', 'AR'))
+
+#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/ranked_gene_skew_to_tissue_skew_correlation.pdf', height = 5, width = 5, useDingbats = FALSE)
+
+par(pty = 's')
+x = 1:length(filt_correlations)
+plot(x,filt_correlations, xlab = 'Gene rank', ylab = 'Pearson correlation', main = 'Gene skew correlations to tissue skew', ylim = c(0,1), xlim = c(0,max(x)+5))
+text(x[index], filt_correlations[index], labels = names(filt_correlations)[index], cex=.8, pos=3, offset = 1)
+#dev.off()
+
+x = 1:length(filt_correlations)
+plot(x,filt_correlations, xlab = 'Gene rank', ylab = 'Pearson correlation', main = 'Gene skew correlations to tissue skew', ylim = c(0,1), xlim = c(0,max(x)+5))
+text(x[index], filt_correlations[index], labels = names(filt_correlations)[index], cex=.8, pos=3, offset = 1)
+
+```
+
+
+
+
+
+```{r}
+length(genes)
+length(keep_genes)
+
+#Get the xchrom starting positions of the genes we kept
+
+kept_gene_meta = attr[attr$name %in% keep_genes, ]
+
+kept_gene_meta
+```
+
+```{r}
+max(gene_skew_num_samps)
+
+```
+
+
+```{r}
+
+#Match the genes starting position with the number of samples that it was used in for skew estimates
+index = match(kept_gene_meta$name,names(gene_skew_num_samps) )
+gene_skew_num_samps = gene_skew_num_samps[index]
+
+
+pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/chrX_map_genes_and_number_of_samps_detected_in_V8.pdf', height = 8, width = 20, useDingbats = FALSE)
+
+kp = plotKaryotype(genome="hg38", plot.type=2, chromosomes=c("chrX"))
+#White text for the black bands
+color_vec = rep('black',40)
+color_vec[c(8,10,23,25,33,39)] = 'white'
+kpAddCytobandLabels(kp,force.all = T, srt=90, cex = .75, col = color_vec)
+#Just a background for the number of samples panel
+kpDataBackground(kp, data.panel = 2)
+#First do the correlations
+#Label a few select genes
+gene_skew_cor_pvalues_adjusted = p.adjust(gene_skew_cor_pvalues, method = 'BH')
+label_genes = names(which(gene_skew_correlations >= .8 & gene_skew_cor_pvalues_adjusted <= .05))
+index = kept_gene_meta$name %in% label_genes
+#Random Y axis plaacement
+#kpPlotMarkers(kp, chr="chrX",data.panel=1, x=kept_gene_meta$start[index], labels = kept_gene_meta$name[index], ignore.chromosome.ends = T, cex=.8)
+#Now add a panel showing the number of samples each gene is detected in, log10 scale
+kpAxis(kp,ymax =4000, tick.pos = c(100,1000,4000), labels = c(2,3,3.6), data.panel = 2)
+kpPoints(kp, chr="chrX",data.panel=2, x=kept_gene_meta$start, y= log10(gene_skew_num_samps) / log10(3700), cex=.75, pch=19) 
+dev.off()
+
+
+kp = plotKaryotype(genome="hg38", plot.type=2, chromosomes=c("chrX"))
+#White text for the black bands
+color_vec = rep('black',40)
+color_vec[c(8,10,23,25,33,39)] = 'white'
+kpAddCytobandLabels(kp,force.all = T, srt=90, cex = .75, col = color_vec)
+#Just a background for the number of samples panel
+kpDataBackground(kp, data.panel = 2)
+#First do the correlations
+#Label a few select genes
+gene_skew_cor_pvalues_adjusted = p.adjust(gene_skew_cor_pvalues, method = 'BH')
+label_genes = names(which(gene_skew_correlations >= .8 & gene_skew_cor_pvalues_adjusted <= .05))
+index = kept_gene_meta$name %in% label_genes
+#Random Y axis plaacement
+#kpPlotMarkers(kp, chr="chrX",data.panel=1, x=kept_gene_meta$start[index], labels = kept_gene_meta$name[index], ignore.chromosome.ends = T, cex=.8)
+#Now add a panel showing the number of samples each gene is detected in, log10 scale
+kpAxis(kp,ymax =4000, tick.pos = c(100,1000,4000), labels = c(2,3,3.6), data.panel = 2)
+kpPoints(kp, chr="chrX",data.panel=2, x=kept_gene_meta$start, y= log10(gene_skew_num_samps) / log10(3700), cex=.75, pch=19) 
+
+
+
+```
+
+
+```{r}
+names(gene_skew_num_samps) 
+
+```
+
+
+```{r}
+#Match the genes starting position with the number of samples that it was used in for skew estimates
+index = match(kept_gene_meta$name,names(gene_skew_num_samps) )
+gene_skew_num_samps = gene_skew_num_samps[index]
+
+
+
+
+#First do the correlations
+#Label a few select genes
+gene_skew_cor_pvalues_adjusted = p.adjust(gene_skew_cor_pvalues, method = 'BH')
+label_genes = names(which(gene_skew_correlations >= .8 & gene_skew_cor_pvalues_adjusted <= .05))
+index = kept_gene_meta$name %in% label_genes
+sum(index)
+kept_gene_meta$start[index]
+```
+
+```{r}
+gene_skew_correlations[gene_skew_correlations >= .8]
+
+```
+
+
+
+
+
+
+####################################################
+Bootstrapping and KS tests for the skew estimates for both filtering methods
+####################################################
+
+
+run the bootsrapping script first
+/home/werner/xchrom_snp_skew/code/bootstrapping_script.R
+
+
+
+
+```{r}
+#old skews
+#oad("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/bootstrap_results_all_v7_GATK_final_filt_2.Rdata")
+
+```
+
+
+```{r}
+
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/bootstrap_results_all_v7_GATK_11_5_2020_update.Rdata")
+
+#With escape genes filtered out
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/bootstrap_results_all_v7_GATK_11_5_2020_update_filt_escape.Rdata")
+
+load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/bootstrap_results_all_v8_GATK_1_20_2021_update_filt_escape.Rdata")
+```
+
+
+```{r}
+#head(boots)
+length(boots)
+
+```
+
+
+```{r}
+
+#For getting the original skew and sigma estimates
+
+get_boot_mu = function(boot){
+  if(length(boot)==1){   #If the bootstrap had an NA, length of the object is 1
+    return(NA)
+  }else{return(boot$t0[1])}
+}
+get_boot_sig = function(boot){
+  if(length(boot)==1){   #If the bootstrap had an NA, length of the object is 1
+    return(NA)
+  }else{return(boot$t0[2])}
+}
+
+
+mus = sapply(boots, get_boot_mu)
+sigmas = sapply(boots, get_boot_sig)
+
+
+
+get_CI = function(boot){
+  if(length(boot)==1){
+    return(c(NA,NA))
+  }else{
+    mu_distribution = boot$t[ ,1]
+    mu_distribution = sort(mu_distribution)
+    
+    #For 200 bootstraps, 2.5% of the distribution is below the 6th index, 2.5% is above the 195th index
+    lower_CI = mu_distribution[6]
+    upper_CI = mu_distribution[195]
+    return(c(lower_CI, upper_CI))
+  }
+}
+
+
+mu_CI = lapply(boots, get_CI)
+
+
+head(mu_CI)
+```
+
+
+
+
+
+
+```{r}
+#Get the lower and upper bounds for the CI
+mu_lower_CI = sapply(mu_CI, '[[', 1)
+mu_upper_CI = sapply(mu_CI, '[[', 2)
+mu_CI_width = mu_upper_CI - mu_lower_CI
+#For plotting
+mu_lower_CI = mus - mu_lower_CI
+mu_upper_CI = mu_upper_CI - mus
+
+
+plot(mus, mu_CI_width)
+hist(mus, breaks=32)
+
+```
+
+
+
+
+
+
+
+
+```{r}
+library(plotrix)  #For the plotCI() function
+```
+```{r}
+#Looking at the first x samples for all three filters
+
+samples = 250
+
+#Check none of these samples are missing, cause then the samples wouldn't line up when comparing between the different filters
+table(is.na(mus[1:samples]))
+
+x = mus[1:samples]
+CI_widths_sorted = sort(mu_CI_width[1:samples], decreasing=TRUE)
+sorted_y = match(mu_CI_width[1:samples], CI_widths_sorted)
+
+
+plotCI(x=x, y=sorted_y, uiw=mu_upper_CI[1:samples], liw=mu_lower_CI[1:samples], err='x', xlim=c(.5,1), 
+       xlab='MLE mu parameter', ylab='CI rank', main='No filtering',
+       sfrac=0)
+
+
+
+
+
+```
+
+
+
+
+Show gene skew density plots for samples in binned ranges for the estimated skews
+Expected that there is greater gene skew variance in the samples .5-.55 .55-.6 compared to 
+samples with estimated skews .75-.8, .8-.85, ect 
+
+```{r}
+list.skew.max[[1]]
+
+```
+
+function to go through the list.skew.max  and return a large list with all the gene level skews 
+```{r}
+
+get_gene_skews = function(data){
+  return(folded(data$C.1))
+}
+
+#unlist(mclapply(1:length(subset.list.skew.max), function(i) get_gene_skews(subset.list.skew.max[[i]]), mc.cores = 5))
+
+
+
+```
+
+```{r}
+max(mus, na.rm = T)
+```
+
+```{r}
+index_55 = which(mus < .55)
+index_6 = which(mus >= .55 & mus < .6)
+index_65 = which(mus >= .6 & mus < .65)
+index_7 = which(mus >= .65 & mus < .7)
+index_75 = which(mus >= .7 & mus < .75)
+index_8 = which(mus >= .75 & mus < .8)
+index_85 = which(mus >= .8 & mus < .85)
+index_9 = which(mus >= .85 & mus < .9)
+index_95 = which(mus >= .9 & mus < .95)
+
+temp_list_skew_max = list.skew.max[index_55]
+gene_skews_55 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_55 = rep('Tissue skew <.55', length(gene_skews_55))
+
+temp_list_skew_max = list.skew.max[index_6]
+gene_skews_6 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_6 = rep('.55 >= Tissue skew <.6', length(gene_skews_6))
+
+temp_list_skew_max = list.skew.max[index_65]
+gene_skews_65 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_65 = rep('.6 >= Tissue skew <.65', length(gene_skews_65))
+
+temp_list_skew_max = list.skew.max[index_7]
+gene_skews_7 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_7 = rep('.65 >= Tissue skew <.7', length(gene_skews_7))
+
+temp_list_skew_max = list.skew.max[index_75]
+gene_skews_75 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_75 = rep('.7 >= Tissue skew <.75', length(gene_skews_75))
+
+temp_list_skew_max = list.skew.max[index_8]
+gene_skews_8 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_8 = rep('.75 >= Tissue skew <.8', length(gene_skews_8))
+
+temp_list_skew_max = list.skew.max[index_85]
+gene_skews_85 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_85 = rep('.8 >= Tissue skew <.85', length(gene_skews_85))
+
+temp_list_skew_max = list.skew.max[index_9]
+gene_skews_9 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_9 = rep('.85 >= Tissue skew <.9', length(gene_skews_9))
+
+temp_list_skew_max = list.skew.max[index_95]
+gene_skews_95 = unlist(mclapply(1:length(temp_list_skew_max), function(i) get_gene_skews(temp_list_skew_max[[i]]), mc.cores = 5))
+labels_95 = rep('.9 >= Tissue skew <.95', length(gene_skews_95))
+
+rm(temp_list_skew_max)
+
+```
+#Leave out the .9 to .95 skews??
+
+```{r}
+
+unphased_gene_skew_df = data.frame(gene_skews = c(gene_skews_55, gene_skews_6, gene_skews_65, gene_skews_7, gene_skews_75, gene_skews_8, gene_skews_85, gene_skews_9), 
+                                   labels = c(labels_55, labels_6, labels_65, labels_7, labels_75, labels_8, labels_85, labels_9))
+unphased_gene_skew_df$labels = factor(unphased_gene_skew_df$labels, levels = rev(c('Tissue skew <.55', '.55 >= Tissue skew <.6', '.6 >= Tissue skew <.65','.65 >= Tissue skew <.7',
+                                                                                   '.7 >= Tissue skew <.75','.75 >= Tissue skew <.8', '.8 >= Tissue skew <.85', '.85 >= Tissue skew <.9')))
+
+```
+
+
+```{r}
+
+gene_skews = ggplot(unphased_gene_skew_df, aes(x = gene_skews, fill = labels)) + geom_density(alpha = .5)+
+  xlab('Gene level skews') +
+  #scale_fill_manual(values=c("blue", "gold3")) +
+  theme(plot.title=element_text(hjust=.5, size=15), axis.text=element_text(size=12),axis.title=element_text(size=12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), panel.background = element_rect(fill = 'white'), 
+        legend.position = 'none')
+gene_skews
+```
+
+
+And a ridge plot version
+
+```{r}
+ggplot(unphased_gene_skew_df, aes(x = gene_skews, y = labels)) + 
+  #stat_density_ridges(quantile_lines = TRUE, quantiles = 2, alpha = 0.7, rel_min_height = 0.005, scale=2 ) +
+  geom_density_ridges(scale=2, aes(y = labels), rel_min_height = 0.005) +
+  xlim(.5,1) + 
+  xlab('Gene skews')+ ylab('Tissue skews') + 
+  theme(plot.title=element_text(hjust=.5, size=14), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+       panel.border = element_rect(colour = "black", fill=NA, size=1), 
+       axis.title.y = element_text(size = 12), axis.text.y = element_text(size = 12), 
+       axis.title.x = element_text(size = 12), axis.text.x = element_text(size = 12),
+       legend.position = 'none',
+       panel.background = element_rect(fill = 'white'))
+
+ggsave(path = '/home/werner/xchrom_snp_skew/code/graphs/entex_validation_folded_normal/', filename = 'gtex_gene_skews_binned_by_tissue_skews.pdf', device = 'pdf', 
+       dpi = 300, width = 6, height = 4, units = 'in', useDingbats = FALSE)
+
+```
+
+
+
+
+KS-test for the pfold norm fit
+```{r}
+#contains the erf(), and the folded normal functions
+library(VGAM)
+```
+
+
+
+
+```{r}
+#Putting all together
+
+#Takes in the list of max SNPs, and vectors of the calculated mu and sigma MLE estimates
+run_ks_test = function(max_snps, mus, sigmas){
+  ks_tests = list()
+  
+  for(i in 1:length(max_snps)){
+    
+    if(Ns[i] < 2){ ks_tests[[i]] = NA; next}
+    
+    
+    #high.f = which(max_snps[[i]]$A.1 < 3000)  #High expressed SNPs filter
+    skews = folded(max_snps[[i]]$C.1)
+    mu = mus[i]
+    sig = sigmas[i]
+    suppressWarnings( {test = ks.test(skews, y='pfoldnorm', mean=mu, sd=sig)} )
+    ks_tests[[i]] = c(test$statistic, test$p.value)
+  
+  }  
+  
+  return(ks_tests)
+}
+
+
+ks_tests = run_ks_test(list.skew.max, mus, sigmas)
+head(ks_tests)
+
+
+```
+
+```{r}
+
+get_p_vals = function(test){
+  if(length(test)==0){return(NA)}
+  return(test[2])
+}
+
+
+```
+
+
+
+
+
+pulling together a dataframe with all the combined stats
+```{r}
+
+
+f = which(!is.na(mus)) #All of the samples that have a mu estimate, they have at least 2 SNPs
+
+
+skew_and_stats_df = data.frame(sample_index = f, skew = mus[f], skew_sigma = sigmas[f], CI_width = mu_CI_width[f], num_snps=Ns[f], tissue=sample_meta$body_site_s[f], donor=sample_meta$Donor_id[f], germ_layer=sample_meta$germ.layer[f])
+
+
+
+skew_and_stats_df = skew_and_stats_df[order(skew_and_stats_df$CI_width), ]
+skew_and_stats_df$CI_rank = 1:dim(skew_and_stats_df)[1]
+#Reorder on sample index
+skew_and_stats_df = skew_and_stats_df[order(skew_and_stats_df$sample_index), ]
+
+
+#Add ks-test pvals and do BH corrections
+p_vals = sapply(ks_tests, get_p_vals)
+
+#Add the p_vals
+skew_and_stats_df$ks_pvals = p_vals[f]
+
+#Adjust the pvalues
+skew_and_stats_df$ks_pvals = p.adjust(skew_and_stats_df$ks_pvals, method = 'BH')
+
+
+
+
+#Order on the p_vals to assign ranks
+skew_and_stats_df = skew_and_stats_df[order(skew_and_stats_df$ks_pvals), ]      #Order on the p values
+skew_and_stats_df$p_val_rank = 1:dim(skew_and_stats_df)[1]                      #Assign ranks
+#Reorder
+skew_and_stats_df = skew_and_stats_df[order(skew_and_stats_df$sample_index), ]
+
+skew_and_stats_df$p_significance = skew_and_stats_df$ks_pvals <= .05
+
+##################################
+#False discovery rate of 1%
+##################################
+
+#fdr = .01
+#BH_value = (skew_and_stats_df$p_val_rank / (dim(skew_and_stats_df)[1])) * fdr     #Get the BH-critical value
+#BH_filt = which(skew_and_stats_df$ks_pvals < BH_value )                         #Find the pvals < their BH value
+#significant = which.max(skew_and_stats_df$ks_pvals[BH_filt])                    #Grab the max p_val out of those and get its rank
+#significant = skew_and_stats_df$p_val_rank[BH_filt[significant]]
+#sig_identity = skew_and_stats_df$p_val_rank < significant                       #Get an identity vector for the significant p_values and add it to the data.frame
+#skew_and_stats_df$p_significance = sig_identity
+
+head(skew_and_stats_df)
+dim(skew_and_stats_df)
+
+```
+
+
+```{r}
+skew_and_stats_df[5000:5025 ,]
+
+```
+
+
+
+
+```{r}
+CI_skew_plot = ggplot(skew_and_stats_df, aes(skew, CI_width, color=p_significance)) + geom_point(alpha=1/5,size=1) + ylab('Skew CI width') + xlab('Skew estimate') + ggtitle('Skew estimate vs CI: Final filtering') + theme(plot.title=element_text(hjust=.5)) + labs(color='Bad MLE fit')+ geom_density_2d() + xlim(.5,1) + ylim(0, .45)
+ggMarginal(CI_skew_plot, groupColour=TRUE, groupFill=TRUE)
+
+
+
+CI_numSNP_plot = ggplot(skew_and_stats_df, aes(num_snps, CI_width, color=p_significance)) + geom_point(alpha=1/5,size=1) + ylab('Skew CI width') + xlab('Number of SNPs used in skew estimate') + ggtitle('Num SNPs vs CI: Final filtering') + theme(plot.title=element_text(hjust=.5)) + labs(color='Bad MLE fit')+ geom_density_2d() + ylim(0, .45) + xlim(0,120)
+ggMarginal(CI_numSNP_plot, groupColour=TRUE, groupFill=TRUE)
+
+
+
+sigma_numSNP_plot = ggplot(skew_and_stats_df, aes(num_snps, skew_sigma, color=p_significance)) + geom_point(alpha=1/5,size=1) + ylab('Skew sigma') + xlab('Number of SNPs used in skew estimate') + ggtitle('Num SNPs vs sigma: Final filtering') + theme(plot.title=element_text(hjust=.5)) + labs(color='Bad MLE fit')+ geom_density_2d() + ylim(0, .45) + xlim(0,120)
+ggMarginal(sigma_numSNP_plot, groupColour=TRUE, groupFill=TRUE)
+
+
+```
+
+
+
+
+
+
+Looking at the cumulative ref ratio density plots for good and bad fits, high and low confidence
+
+
+```{r}
+
+f_bad_low = (skew_and_stats_df$p_significance == TRUE) & (skew_and_stats_df$CI_width >= .05 )
+f_bad_high = (skew_and_stats_df$p_significance == TRUE) & (skew_and_stats_df$CI_width < .05 )
+f_good_low = (skew_and_stats_df$p_significance == FALSE) & (skew_and_stats_df$CI_width >= .05 )
+f_good_high = (skew_and_stats_df$p_significance == FALSE) & (skew_and_stats_df$CI_width < .05)
+
+l = vector(mode='character', length=length(f_bad_low))
+
+l[f_bad_low] = 'Bad fit Low confidence'
+l[f_bad_high] = 'Bad fit High confidence'
+l[f_good_low] = 'Good fit Low confidence'
+l[f_good_high] = 'Good fit High confidence'
+
+skew_and_stats_df$sum_label = l
+
+
+#Pooling together all the SNP skews from all samples in the different Bad/Good fit High/Low confidence categories
+
+
+index = skew_and_stats_df[f_bad_low, 'sample_index']
+bad_low_num = length(index)
+high.f = which(list.skew.max[[index[1]]]$A.1 < 3000)
+bad_low = list.skew.max[[index[1]]]$C.1[high.f]
+for(i in 2:length(index)){
+  high.f = which(list.skew.max[[index[i]]]$A.1 < 3000)
+  bad_low = c(bad_low, list.skew.max[[index[i]]]$C.1[high.f])
+}
+
+
+index = skew_and_stats_df[f_bad_high, 'sample_index']
+bad_high_num = length(index)
+high.f = which(list.skew.max[[index[1]]]$A.1 < 3000)
+bad_high = list.skew.max[[index[1]]]$C.1[high.f]
+for(i in 2:length(index)){
+  high.f = which(list.skew.max[[index[i]]]$A.1 < 3000)
+  bad_high = c(bad_high, list.skew.max[[index[i]]]$C.1[high.f])
+}
+
+index = skew_and_stats_df[f_good_low, 'sample_index']
+good_low_num = length(index)
+high.f = which(list.skew.max[[index[1]]]$A.1 < 3000)
+good_low = list.skew.max[[index[1]]]$C.1[high.f]
+for(i in 2:length(index)){
+  high.f = which(list.skew.max[[index[i]]]$A.1 < 3000)
+  good_low = c(good_low, list.skew.max[[index[i]]]$C.1[high.f])
+}
+
+index = skew_and_stats_df[f_good_high, 'sample_index']
+good_high_num = length(index)
+high.f = which(list.skew.max[[index[1]]]$A.1 < 3000)
+good_high = list.skew.max[[index[1]]]$C.1[high.f]
+for(i in 2:length(index)){
+  high.f = which(list.skew.max[[index[i]]]$A.1 < 3000)
+  good_high = c(good_high, list.skew.max[[index[i]]]$C.1[high.f])
+}
+
+
+a = rep('Bad fit Low confidence',length(bad_low))
+b = rep('Bad fit High confidence',length(bad_high))
+c = rep('Good fit Low confidence',length(good_low))
+d = rep('Good fit High confidence',length(good_high))
+
+
+summary_skews = c(bad_low, bad_high, good_low, good_high)
+summary_label = c(a,b,c,d)
+summary_density_df = data.frame(summary_skews = summary_skews, summary_label = summary_label)
+
+
+ggplot(summary_density_df[summary_density_df$summary_label %in% c('Good fit High confidence','Good fit Low confidence'), ], aes(x=summary_skews, fill=summary_label)) + geom_density(alpha=.5) + ggtitle('Final filtering: Good folded_norm fits') + xlab('Ref / Total') + xlim(0,1) + theme(plot.title=element_text(hjust=.5))
+
+
+ggplot(summary_density_df[summary_density_df$summary_label %in% c('Bad fit High confidence','Bad fit Low confidence'), ], aes(x=summary_skews, fill=summary_label)) + geom_density(alpha=.5) + ggtitle('Final filtering: Bad folded_norm fits') + xlab('Ref / Total') + xlim(0,1) + theme(plot.title=element_text(hjust=.5))
+
+```
+
+```{r}
+sum(f_bad_low[!is.na(f_bad_low)])  
+sum(f_bad_high[!is.na(f_bad_high)])
+sum(f_good_low[!is.na(f_good_low)]) 
+sum(f_good_high[!is.na(f_good_high)]) 
+
+```
+
+
+
+
+And what if I use TSIX or XIST skews as the skew estimate for the tissue for the samples that fail the KS-test for the folded normal distribution?
+
+```{r}
+est_skew = mus[f]
+
+```
+
+```{r}
+
+bad_fold_norm_samples = skew_and_stats_df$sample_index[skew_and_stats_df$p_significance == TRUE]
+par(pty = 's')
+hist(est_skew, breaks = 32, xlim = c(.5,1), main = 'Original tissue skews')
+
+
+
+current_gene = 'XIST'
+re_gene_ref_skew = c()
+sample_index_for_gene= c()
+for(i in 1:length(list.skew.max)){
+  
+  data = list.skew.max[[i]]
+  present = data$name == current_gene
+  if(sum(present) == 0) #If detected in that sample, grab the sample index and the gene skew
+    {next} else{
+      sample_index_for_gene = c(sample_index_for_gene, i)
+      re_gene_ref_skew = c(re_gene_ref_skew ,data[present, 'C.1'])
+  }
+}
+
+#Replace the skews of samples that are bad folded normal fits and also express XIST with the XIST skew
+temp_skews_xist = est_skew
+bad_fits_and_xist = sample_index_for_gene[sample_index_for_gene %in% bad_fold_norm_samples] #The samples that are bad and also express XIST
+temp_skews_xist[bad_fits_and_xist] = folded(re_gene_ref_skew[bad_fits_and_xist]) #Replace with XIST skews
+
+hist(temp_skews_xist, breaks = 32, xlim = c(.5,1), main = 'Replacing bad fits with XIST skews')
+plot(est_skew, temp_skews_xist, xlim = c(.5,1), main = 'Original skews vs replaced XIST skews', xlab = 'Original skews', ylab = 'XIST skews')
+abline(a=0,b=1,col = 'red')
+
+
+
+#Repeat for TSIX
+current_gene = 'TSIX'
+re_gene_ref_skew = c()
+sample_index_for_gene= c()
+for(i in 1:length(list.skew.max)){
+  
+  data = list.skew.max[[i]]
+  present = data$name == current_gene
+  if(sum(present) == 0) #If detected in that sample, grab the sample index and the gene skew
+    {next} else{
+      sample_index_for_gene = c(sample_index_for_gene, i)
+      re_gene_ref_skew = c(re_gene_ref_skew ,data[present, 'C.1'])
+  }
+}
+temp_skews_tsix = est_skew
+bad_fits_and_tsix = sample_index_for_gene[sample_index_for_gene %in% bad_fold_norm_samples] 
+temp_skews_tsix[bad_fits_and_tsix] = folded(re_gene_ref_skew[bad_fits_and_tsix])
+
+hist(temp_skews_tsix, breaks = 32, xlim = c(.5,1), main = 'Replacing bad fits with TSIX skews')
+plot(est_skew, temp_skews_tsix, xlim = c(.5,1), main = 'Original skews vs replaced TSIX skews', xlab = 'Original skews', ylab = 'TSIX skews')
+abline(a=0,b=1,col = 'red')
+
+```
+
+```{r}
+
+bad_fold_norm_samples = skew_and_stats_df$sample_index[skew_and_stats_df$p_significance == TRUE]
+
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+#save(skew_and_stats_df, file = "/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/final_filtering_skew_and_stats_df.Rdata")
+
+#save(skew_and_stats_df, file = "/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/final_filtering_skew_and_stats_11_5_20_df.Rdata")
+
+#save(skew_and_stats_df, file = "/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/final_filtering_skew_and_stats_11_5_20_escape_filt_df.Rdata")
+
+
+save(skew_and_stats_df, file = "/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/v8_final_filtering_skew_and_stats_1_20_21_escape_filt_df.Rdata")
+
+```
+
+
+
+Compare the skew estimates using the correct data (fixed annotations and SNP filtering) to the original skew estimates
+```{r}
+#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/final_filtering_skew_and_stats_df.Rdata")
+load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/final_filtering_skew_and_stats_11_5_20_escape_filt_df.Rdata")
+```
+
+```{r}
+#Samples that had skews in the original SNP list, which was wrong
+index = skew_and_stats_df$sample_index
+#Updated presumably corect skews
+updated_skews = est_skew[index]
+
+old_skews =skew_and_stats_df$skew
+
+par(pty = 's')
+plot(old_skews, updated_skews, cex=.25, xlim = c(.5,1), ylim = c(.5,1))
+abline(a = 0, b=1, col='red', lty=2)
+```
+
+```{r}
+length(old_skews)
+
+t = 1:length(est_skew)
+new_samples = t[!t%in%index]  #Getting the samples that were previously filtered out in the original SNP list
+hist(est_skew[new_samples], main = 'Skews of samples previously filtered out', xlab = 'Skew estimates')
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
