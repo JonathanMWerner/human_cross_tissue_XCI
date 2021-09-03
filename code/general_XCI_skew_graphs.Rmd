@@ -1,0 +1,305 @@
+
+
+
+Just getting graphs for the XCI-skew project
+```{r}
+library(VGAM) 
+library("gridExtra")
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+```
+
+
+load the max-powered SNPs for each sample, and the statistics dataframe
+
+```{r}
+load("../data/all_v8_GTEx_gene_filtered.skew.est.max.genes.Rdata")
+load("../data/v8_GTEx_skew_and_stats_df.Rdata")
+
+
+
+
+```
+
+
+
+```{r}
+folded <- function(x) { apply( cbind(x,1-x), 1, max)} 
+
+```
+
+Making basic binomial plots for the figure 1 graphic. Demonstrating the binomial distribution of XCI
+
+####################################
+Figure 1 graphs in panels a and b
+###################################
+
+
+```{r}
+#Binomial from 16 cells
+par(pty = 's')
+p = .5
+n = 16
+x = 0:n
+test = dbinom(x, size = n, prob = p)
+plot(x/n, test, xlab = 'Xm / Xm + Xp', ylab = 'probability', type ='b', lwd=5, pch=19, cex.lab = 1.5, cex.axis=1.25)
+box(lwd = 3)
+
+
+
+#Binomial from 32 cells
+n = 32
+x = 0:n
+test = dbinom(x, size = n, prob = p)
+plot(x/n, test, xlab = 'Xm / Xm + Xp', ylab = 'probability', type ='b', lwd=5, pch=19, cex.lab = 1.5, cex.axis = 1.25)
+box(lwd = 3)
+
+
+#Binomial from 8 cells
+n = 8
+x = 0:n
+test = dbinom(x, size = n, prob = p)
+plot(x/n, test, xlab = 'Xm / Xm + Xp', ylab = 'probability', type ='b', lwd=5, pch=19, cex.lab = 1.5, cex.axis = 1.25)
+box(lwd = 3)
+
+```
+
+
+Simulate data for a 75% skewed sample, unfolded and folded for the example in Figure 2. Add the folded normal model to it as well
+
+#########################
+Figure 2 panel a
+#########################
+
+```{r}
+mat_skew = .75
+pat_skew = 1 - mat_skew
+sd_skew = .05
+
+num_genes = 10000
+
+mat_exp = rnorm(n = num_genes, mean = mat_skew, sd = sd_skew)
+pat_exp = rnorm(n = num_genes, mean = pat_skew, sd = sd_skew)
+
+hist(mat_exp, xlim = c(0,1), breaks = seq(0,1,.025), freq = F)
+hist(pat_exp, xlim = c(0,1), breaks = seq(0,1,.025), freq = F, add = T)
+
+folded_skews = c(mat_exp, pat_exp)
+folded_skews = folded(folded_skews)
+
+hist(folded_skews, xlim = c(.5,1))
+
+
+
+exp_skew_df = data.frame(skews = c(c(mat_exp, pat_exp), folded_skews), label = c(rep('Unfolded', length = num_genes*2), rep('Folded', length = num_genes*2)))
+
+
+
+gg_2 <- ggplot(exp_skew_df[exp_skew_df$label == 'Unfolded', ], aes(x=skews)) + geom_histogram(binwidth = .05, colour="black", fill = "#06e3ff", aes(y=..density..)) + 
+  ggtitle('Unfolded skews') +
+  scale_x_continuous(limits = c(-0.01, 1.01)) + 
+  theme( plot.title=element_text(hjust=.5, size=15), axis.text.y = element_text(size=15), axis.title.y = element_text(size=15),
+         axis.text.x = element_text(size=15), axis.title.x = element_text(size=15), 
+         panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+         panel.border = element_rect(colour = "black", fill=NA, size=1), panel.background = element_rect(fill = 'white')) +
+  xlab('Reference skew')
+
+gg_2 = gg_2 + geom_vline(xintercept = .5, linetype="dashed", color = "red", size=1)
+gg_2
+
+
+gg_2f <- ggplot(exp_skew_df[exp_skew_df$label == 'Folded', ], aes(x=skews)) + geom_histogram(binwidth = .025, colour="black", fill = 'white', aes(y=..density..)) +
+  ggtitle('Folded skews') + scale_x_continuous(limits = c(.499, 1.01))+ 
+  theme( plot.title=element_text(hjust=.5, size=15), axis.text.y = element_text(size=15), axis.title.y = element_text(size=15),
+         axis.text.x = element_text(size=15), axis.title.x = element_text(size=15), 
+         panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+         panel.border = element_rect(colour = "black", fill=NA, size=1), panel.background = element_rect(fill = 'white')) + 
+  xlab('Folded reference skew')
+
+gg_2f <- gg_2f + stat_function(fun=dfoldnorm, color="red", args=list(mean=mat_skew, sd=sd_skew), size = 1) +
+  geom_vline(xintercept = .5, linetype="dashed", color = "red", size=1)
+gg_2f
+
+grid.arrange(gg_2, gg_2f, nrow=1)
+skewed_gg = arrangeGrob(gg_2, gg_2f, nrow=1)
+
+```
+
+Plot unfolded and folded examples of real tissue gene skews for a range of skewed tissues
+
+```{r}
+example_skews = c(.55,.65,.75,.85)
+limit = .04
+i = 4
+potential_samples = skew_and_stats_df$sample_index[(skew_and_stats_df$skew >= example_skews[i] - limit) & (skew_and_stats_df$skew <= example_skews[i] + limit) & skew_and_stats_df$num_snps >= 50]
+length(potential_samples)
+
+for(j in 1:length(potential_samples)){
+  sample_data = list.skew.max[[potential_samples[j]]]
+  sample_ref_skews = sample_data$C.1
+  est_skew = skew_and_stats_df$skew[skew_and_stats_df$sample_index ==potential_samples[j] ]
+  hist(sample_ref_skews, breaks = seq(0,1,.05), xlim = c(0,1), main = sprintf('%i: %1.3f',potential_samples[j], est_skew) )
+}
+```
+
+```{r}
+
+example_sample_ids = c(4003, 602, 4647, 1368)
+example_sample_skews = skew_and_stats_df$skew[match(example_sample_ids,skew_and_stats_df$sample_index)]
+example_sample_skews_sd = skew_and_stats_df$skew_sigma[match(example_sample_ids,skew_and_stats_df$sample_index)]
+
+skews = c()
+folded_label = c()
+sample_label = c()
+for(i in 1:length(example_sample_ids)){
+  #Get the reference skews
+  sample_data = list.skew.max[[example_sample_ids[i]]]
+  sample_ref_skews = sample_data$C.1
+  skews_add = c(sample_ref_skews, folded(sample_ref_skews))
+  skews = c(skews, skews_add)
+  folded_label_add = c(rep('Unfolded', length = length(sample_ref_skews)), rep('Folded', length = length(folded(sample_ref_skews))) )
+  folded_label = c(folded_label, folded_label_add)
+  text = as.character(sprintf('Sample skew: %1.3f', example_sample_skews[i]))
+  sample_label = c(sample_label, rep(text, length=length(skews_add)))
+}
+
+multi_skew_tissue_df = data.frame(skews = skews, folded_label = folded_label, sample_label = sample_label)
+multi_skew_tissue_df
+
+
+```
+
+```{r}
+sample_labels = unique(multi_skew_tissue_df$sample_label)
+
+
+
+make_unfolded_ggplot = function(sample_label){
+
+  data_index = multi_skew_tissue_df$folded_label == 'Unfolded' & multi_skew_tissue_df$sample_label == sample_label
+  g = ggplot(multi_skew_tissue_df[data_index, ], aes(x = skews)) + geom_histogram(binwidth = .05, colour="black", fill = "#06e3ff") +
+    geom_vline(xintercept = .5, linetype="dashed", color = "red", size=1) +
+    ggtitle(sample_label) + 
+    scale_x_continuous(limits = c(-.01, 1.01))+ 
+    theme( plot.title=element_text(hjust=.5, size=15), axis.text.y = element_text(size=15), axis.title.y = element_text(size=15),
+           axis.text.x = element_text(size=15), axis.title.x = element_text(size=15), 
+           panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.border = element_rect(colour = "black", fill=NA, size=1), panel.background = element_rect(fill = 'white')) + 
+    xlab('Reference skew')
+  return(g)
+}
+
+g1 = make_unfolded_ggplot(sample_labels[1]) 
+g2 = make_unfolded_ggplot(sample_labels[2]) 
+g3 = make_unfolded_ggplot(sample_labels[3])  
+g4 = make_unfolded_ggplot(sample_labels[4]) 
+
+grid.arrange(g1, g2,g3,g4, nrow=1)
+skewed_gg = arrangeGrob(g1, g2,g3,g4, nrow=1)
+
+
+
+
+make_folded_ggplot = function(sample_label, mean_skew, sd_skew){
+
+  data_index = multi_skew_tissue_df$folded_label == 'Folded' & multi_skew_tissue_df$sample_label == sample_label
+  g = ggplot(multi_skew_tissue_df[data_index, ], aes(x = skews)) + geom_histogram(binwidth = .025, colour="black", fill = 'white', aes(y=..density..)) +
+    geom_vline(xintercept = .5, linetype="dashed", color = "red", size=1) +
+    ggtitle(sample_label) + 
+    scale_x_continuous(limits = c(.499, 1.01))+ 
+    stat_function(fun=dfoldnorm, color="red", args=list(mean=mean_skew, sd=sd_skew), size = 1) +
+    theme( plot.title=element_text(hjust=.5, size=15), axis.text.y = element_text(size=15), axis.title.y = element_text(size=15),
+           axis.text.x = element_text(size=15), axis.title.x = element_text(size=15), 
+           panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+           panel.border = element_rect(colour = "black", fill=NA, size=1), panel.background = element_rect(fill = 'white')) + 
+    xlab('Folded reference skew')
+  return(g)
+}
+
+
+g1_f = make_folded_ggplot(sample_labels[1], example_sample_skews[1], example_sample_skews_sd[1] ) 
+g2_f = make_folded_ggplot(sample_labels[2], example_sample_skews[2], example_sample_skews_sd[2] ) 
+g3_f = make_folded_ggplot(sample_labels[3], example_sample_skews[3], example_sample_skews_sd[3] )  
+g4_f = make_folded_ggplot(sample_labels[4], example_sample_skews[4], example_sample_skews_sd[4] ) 
+
+grid.arrange(g1_f, g2_f,g3_f,g4_f, nrow=1)
+skewed_gg = arrangeGrob(g1_f, g2_f,g3_f,g4_f, nrow=1)
+
+```
+
+###########################
+Figure 2 panel b
+###########################
+
+
+```{r}
+grid.arrange(g1, g2,g3,g4, g1_f, g2_f,g3_f,g4_f, nrow=2)
+combined_skewed_gg = arrangeGrob(g1, g2,g3,g4, g1_f, g2_f,g3_f,g4_f, nrow=2)
+
+```
+
+
+Plot different binomial distributions centered at .75 for the tissue specification graphic
+
+########################
+Figure 5 panel c
+########################
+
+
+```{r}
+
+skew = .75
+n_1 = 16
+n_2 = 64
+par(pty = 's')
+
+skews_1 = 0:n_1
+binom_1 = dbinom(skews_1, size = n_1, prob = skew )
+plot(skews_1/n_1, binom_1, type ='b', lwd=5, pch=19, cex.lab = 1.5, cex.axis = 1.25, xlim = c(.5, 1))
+abline(v = .75, col = 'red')
+
+
+par(pty = 's')
+
+skews_2 = 0:n_2
+binom_2 = dbinom(skews_2, size = n_2, prob = skew )
+plot(skews_2/n_2, binom_2, type ='b', lwd=5, pch=19, cex.lab = 1.5, cex.axis = 1.25, xlim = c(.5, 1))
+abline(v = .75, col = 'red')
+
+```
+
+
+```{r}
+
+head(skew_and_stats_df)
+dim(skew_and_stats_df)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

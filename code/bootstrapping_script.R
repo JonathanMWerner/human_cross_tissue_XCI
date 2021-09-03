@@ -7,7 +7,7 @@ library(boot)
 library(parallel)
 library(MASS)
 
-load('/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_1_20_2021_update_filt_escape.skew.est.max.genes.Rdata')
+load('../data/all_v8_GTEx_gene_filtered.skew.est.max.genes.Rdata')
 
 
 rm(ratios.max, Ns)
@@ -19,8 +19,6 @@ p = 50:100/100
 folded <- function(x) { apply( cbind(x,1-x), 1, max)} 
 unfold <- function(x) { c(x,1-x) } 
 
-#Sara's MLE function
-# Maximum likelihood estimate function. Note, x is a global variable! Should fix but this lets me use it in the bootstrap later.  
 mle_folded <- function(x){ 
   mus = seq(0.5,1, by = 0.001)
   sigmas = seq(0,0.5, by = 0.01)
@@ -35,10 +33,6 @@ mle_folded <- function(x){
 } 
 
 
-
-#data is the unfolded reference SNP ratios for a sample
-#p is the skews to test
-#indicies is needed by the boot() to generate bootstrap samples
 boot_skew = function(data, indices){
   
   x = data[indices]           #For the bootstrap sampling
@@ -51,7 +45,6 @@ boot_skew = function(data, indices){
 #function for the lapply()
 parallel_boot = function(max_ratio){
 
-  #high.f = which(max_ratio$A.1 < 3000)      #Filtering out highly expressed SNPs
   sample = max_ratio$C.1 
   
   if(length(sample) == 0 | length(sample) == 1){return(NA) }   #NULL samples, and samples with 1 or 0 SNPs
@@ -72,6 +65,6 @@ boots = mclapply(list.skew.max, parallel_boot, mc.cores = numCores)
 print(sprintf('Ending bootstap method, time is: %s', Sys.time()))
 
 
-save(boots, file = '/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/bootstrap_results_all_v8_GATK_1_20_2021_update_filt_escape.Rdata')
+save(boots, file = '../data/bootstrap_XCI_skews_all_v8_GTEx.Rdata')
 
 

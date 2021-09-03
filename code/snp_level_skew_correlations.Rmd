@@ -1,0 +1,653 @@
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(reshape2)
+library(ggplot2)
+library(ggridges)
+library(dplyr)
+```
+
+
+
+
+
+Getting skew correlations for tissues across donors, but at the SNP level. Skew correlations in the folded space, using the skew estimates, may be misleading
+
+A perfectly correlated pair of tissues could have folded skews of .7 but in reality could have skews of .3, .7 or .7, .3, being completely uncorrelated
+
+A single snp that is expressed in both tissues, the direction is conserved. If the reference is maternal in tissue 1 it will be reference in tissue 2 for the same donor.
+
+Will also reveal if tissues share the same parental direction of inactivation for an individual
+
+
+
+Use the unfiltered list.skew
+```{r}
+
+load("../data/all_v8_GATK.skew.est.max.genes.Rdata")
+
+
+```
+
+Has the gene name info already, can filter for the good genes by that
+```{r}
+
+head(list.skew)
+
+```
+
+```{r}
+rm(list.skew.max, ratios.max, ratios.max.genes, Ns)
+
+```
+
+
+
+
+Get the genes that were previously kept in the original filtering
+
+found in the keep_genes list
+
+```{r}
+
+load('../data/gene_skew_to_tissue_skew_correlations_v8.Rdata')
+
+```
+
+
+
+Get the skew and stats data
+
+the skew_and_stats_df has the sample index to the list.vcf files that has all the skew info
+
+```{r}
+
+load("../data/v8_GTEx_skew_and_stats_df.Rdata")
+
+```
+
+```{r}
+head(skew_and_stats_df)
+
+```
+
+
+```{r}
+
+tissues = unique(skew_and_stats_df$tissue)
+tissues = tissues[!tissues %in% c('Testis', 'Prostate')]
+```
+
+Also exclude the cell cultures
+
+```{r}
+tissues = tissues[!grepl('Cells', tissues)]
+
+```
+
+
+
+```{r}
+
+table(bad_gene_skew_df$gene_name)
+```
+
+
+
+
+See if the Bad genes are escapers, look at their deviance from .5 compared to all other kept genes. Hypothesis is that the bad genes' deviance distribution is closer to 0 than the other genes, biased towards .5 expression because of escape
+
+
+
+Build the matrices with the Donor names per tissue comparison
+```{r}
+tiss_tiss_donors_df = as.data.frame(matrix(nrow = length(tissues), ncol = length(tissues)))
+rownames(tiss_tiss_donors_df) = tissues
+colnames(tiss_tiss_donors_df) = tissues
+
+tiss_tiss_donors_names_matrix = matrix(rep(list(), length(tissues)*length(tissues)), nrow=length(tissues), ncol=length(tissues))
+rownames(tiss_tiss_donors_names_matrix) = tissues
+colnames(tiss_tiss_donors_names_matrix) = tissues
+
+for(i in 1:length(tissues)){
+  
+  current_tiss = tissues[i]
+  
+  for(j in 1: length(tissues)){
+    
+    next_tiss = tissues[j]
+    
+    donors_for_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == current_tiss])
+    #Just going to ignore the donors that have multiple donations for the same tiss
+    duplicates = donors_for_tiss[duplicated(donors_for_tiss)] 
+    donors_for_tiss = donors_for_tiss[!donors_for_tiss %in% duplicates]  
+    
+    donors_for_next_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == next_tiss])
+    duplicates = donors_for_next_tiss[duplicated(donors_for_next_tiss)] 
+    donors_for_next_tiss = donors_for_next_tiss[!donors_for_next_tiss %in% duplicates]
+    
+    tiss_tiss_donors_df[i,j] = sum(unique(donors_for_tiss) %in% unique(donors_for_next_tiss))
+    tiss_tiss_donors_names_matrix[i,j] = list(unique(donors_for_tiss[donors_for_tiss %in% donors_for_next_tiss]))
+  }
+}
+
+tiss_tiss_donors_df
+tiss_tiss_donors_names_matrix
+
+```
+
+```{r}
+bad_genes = levels(bad_gene_skew_df$gene_name)
+bad_genes
+```
+
+
+
+
+Testing this out, start with the two first adipose tissues
+
+
+```{r}
+
+skew_thresh = .60
+
+tissue_1 = 'Adipose - Subcutaneous'
+tissue_2 = 'Whole Blood'
+
+#Grab the donors for those tissues
+temp_donors = tiss_tiss_donors_names_matrix[[tissue_1, tissue_2]]
+
+all_tiss_1_snp_skews = c()
+all_tiss_2_snp_skews = c()
+all_donor_specific_snp_skew_corrs = c()
+
+for(j in 1:length(temp_donors)){
+  #For a donor, get the list.skew vcf files for each tissue
+  donor = temp_donors[j]
+  
+  index_1 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_1
+  index_2 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_2
+  
+  tissue_1_index = skew_and_stats_df$sample_index[index_1]
+  tissue_2_index = skew_and_stats_df$sample_index[index_2]
+  
+  #Only use tissues that are skewed >= 0.6
+  tiss_1_skew = skew_and_stats_df$skew[index_1]
+  tiss_2_skew = skew_and_stats_df$skew[index_2]
+  if( tiss_1_skew < skew_thresh | tiss_2_skew < skew_thresh){next}
+  
+  tissue_1_vcf = list.skew[[tissue_1_index]]
+  tissue_2_vcf = list.skew[[tissue_2_index]]
+  
+  
+  #See if there are any SNPs in common between the two tissues and are also in genes we keep
+  #SNP positions are in the first column of the vcf tables
+  shared_snp_starts = tissue_1_vcf[ ,1][ (tissue_1_vcf[ ,1] %in%  tissue_2_vcf[ ,1]) & as.character(tissue_1_vcf[ ,'name']) %in% keep_genes ]
+  #Grab the reference skew of the shared snps
+  #Since the SNP starting positions are aalready ordered, the indices will match for the SNPs across the tissues
+  tiss_1_ref_skew = tissue_1_vcf[ tissue_1_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+  tiss_2_ref_skew = tissue_2_vcf[ tissue_2_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+
+  
+  donor_specific_correlation = cor(tiss_1_ref_skew, tiss_2_ref_skew)
+  par(pty = 's')
+  plot(tiss_1_ref_skew,tiss_2_ref_skew, xlim = c(0,1), ylim = c(0,1), cex = .5 , 
+     xlab = sprintf('%s', tissue_1), 
+     ylab = sprintf('%s', tissue_2), 
+     main = sprintf('SNP reference skew correlation: %f', donor_specific_correlation))
+  abline(a = 0, b = 1, col = 'red')
+  
+  all_donor_specific_snp_skew_corrs = c(all_donor_specific_snp_skew_corrs, donor_specific_correlation )
+  all_tiss_1_snp_skews = c(all_tiss_1_snp_skews,tiss_1_ref_skew)
+  all_tiss_2_snp_skews = c(all_tiss_2_snp_skews,tiss_2_ref_skew)
+}
+
+
+correlation = cor(all_tiss_1_snp_skews, all_tiss_2_snp_skews )
+par(pty = 's')
+plot(all_tiss_1_snp_skews,all_tiss_2_snp_skews, xlim = c(0,1), ylim = c(0,1), cex = .5 , 
+     xlab = sprintf('%s', tissue_1), 
+     ylab = sprintf('%s', tissue_2), 
+     main = sprintf('SNP reference skew correlation: %f', correlation))
+abline(a = 0, b = 1, col = 'red')
+
+hist(all_donor_specific_snp_skew_corrs, main = 'Donor specific skew correlations')
+
+
+```
+
+
+
+And extend to all tissues
+
+
+```{r}
+skew_thresh = .60
+p = .5
+
+tiss_tiss_shared_snp_skew_correlation = matrix(nrow = length(tissues), ncol = length(tissues))
+rownames(tiss_tiss_shared_snp_skew_correlation) = tissues
+colnames(tiss_tiss_shared_snp_skew_correlation) = tissues
+
+tiss_tiss_donor_specific_skew_corrs = matrix(rep(list(), length(tissues)^2) , nrow = length(tissues), ncol = length(tissues))
+rownames(tiss_tiss_donor_specific_skew_corrs) = tissues
+colnames(tiss_tiss_donor_specific_skew_corrs) = tissues
+
+tiss_tiss_donor_specific_snp_nums = matrix(rep(list(), length(tissues)^2) , nrow = length(tissues), ncol = length(tissues))
+rownames(tiss_tiss_donor_specific_skew_corrs) = tissues
+colnames(tiss_tiss_donor_specific_skew_corrs) = tissues
+
+tiss_tiss_donor_names = matrix(rep(list(), length(tissues)^2) , nrow = length(tissues), ncol = length(tissues))
+rownames(tiss_tiss_donor_names) = tissues
+colnames(tiss_tiss_donor_names) = tissues
+
+#n1_ests_matrix = matrix(nrow = length(tissues), ncol = length(tissues))
+#rownames(n1_ests_matrix) = tissues
+#colnames(n1_ests_matrix) = tissues
+
+num_shared_snps_matrix = matrix(nrow = length(tissues), ncol = length(tissues))
+rownames(num_shared_snps_matrix) = tissues
+colnames(num_shared_snps_matrix) = tissues
+
+for(i in 1:length(tissues)){
+  tissue_1 = tissues[i]
+
+  for(j in 1:length(tissues)){
+    tissue_2 = tissues[j]
+
+    
+    #Grab the donors for those tissues
+    temp_donors = tiss_tiss_donors_names_matrix[[tissue_1, tissue_2]]
+    if(length(temp_donors) == 0){next}
+    
+    all_tiss_1_snp_skews = c()
+    all_tiss_2_snp_skews = c()
+  
+    all_donors = c()
+    all_donor_specific_skew_corrs = c()
+    all_donor_shared_snp_nums = c()
+    for(k in 1:length(temp_donors)){
+      #For a donor, get the list.skew vcf files for each tissue
+      donor = temp_donors[k]
+      
+      index_1 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_1
+      index_2 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_2
+      
+      tissue_1_index = skew_and_stats_df$sample_index[index_1]
+      tissue_2_index = skew_and_stats_df$sample_index[index_2]
+      
+      #Only use tissues that are skewed >= 0.6
+      tiss_1_skew = skew_and_stats_df$skew[index_1]
+      tiss_2_skew = skew_and_stats_df$skew[index_2]
+      if( tiss_1_skew < skew_thresh | tiss_2_skew < skew_thresh){next}
+      
+      
+      tissue_1_vcf = list.skew[[tissue_1_index]]
+      tissue_2_vcf = list.skew[[tissue_2_index]]
+      
+      
+      #See if there are any SNPs in common between the two tissues and are also in genes we keep
+      #SNP positions are in the first column of the vcf tables
+      shared_snp_starts = tissue_1_vcf[ ,1][ (tissue_1_vcf[ ,1] %in%  tissue_2_vcf[ ,1]) & as.character(tissue_1_vcf[ ,'name']) %in% keep_genes ]
+      #Grab the reference skew of the shared snps
+      tiss_1_ref_skew = tissue_1_vcf[ tissue_1_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+      tiss_2_ref_skew = tissue_2_vcf[ tissue_2_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+    
+      #Save donor-specific SNP reference skew correlation
+      donor_specific_corr = cor(tiss_1_ref_skew,tiss_2_ref_skew, method = 'pearson')
+      all_donor_specific_skew_corrs = c(all_donor_specific_skew_corrs,donor_specific_corr)
+      #And the number of shared SNPs for that donor
+      all_donor_shared_snp_nums = c(all_donor_shared_snp_nums, length(tiss_1_ref_skew))
+      
+      all_donors = c(all_donors, donor)
+      all_tiss_1_snp_skews = c(all_tiss_1_snp_skews,tiss_1_ref_skew)
+      all_tiss_2_snp_skews = c(all_tiss_2_snp_skews,tiss_2_ref_skew)
+    }
+    
+    #Get the correlation across all donors
+    if(length(all_tiss_1_snp_skews) <= 2 | length(all_tiss_2_snp_skews) <= 2 ){next}
+    correlation = cor(all_tiss_1_snp_skews, all_tiss_2_snp_skews, method = 'pearson' )
+    tiss_tiss_shared_snp_skew_correlation[i,j] = correlation
+    
+    #Save as a list the donor-spcific skew correlations
+    tiss_tiss_donor_specific_skew_corrs[i,j] = list(all_donor_specific_skew_corrs)
+    tiss_tiss_donor_specific_snp_nums[i,j] = list(all_donor_shared_snp_nums )
+    #And the donor names
+    tiss_tiss_donor_names[i,j] = list(all_donors)
+    
+    #Calculate the n1 estimate using the SNP reference skew correlation
+    #n1_ests_matrix[i,j] = (p*(1-p)) / ( correlation * sd(all_tiss_1_snp_skews) * sd(all_tiss_2_snp_skews) )
+    num_shared_snps_matrix[i,j] = length(all_tiss_1_snp_skews) / length(temp_donors)
+    
+    #Get some visualizations
+    if( i %in% c(1)){
+      par(pty = 's')
+      plot(all_tiss_1_snp_skews,all_tiss_2_snp_skews, xlim = c(0,1), ylim = c(0,1), cex = .5 , 
+           xlab = sprintf('%s', tissue_1), 
+           ylab = sprintf('%s', tissue_2), 
+           main = sprintf('SNP reference skew correlation: %f', correlation))
+      abline(a = 0, b = 1, col = 'red')
+    }
+  }
+}
+
+```
+
+
+
+
+
+Explore the donor specific skew correlations
+
+
+```{r}
+all_tissue_donor_specific_corr_df = data.frame(donor_specific_corrs =c(), snp_num = c(), tissue_name = c(), pairwise_name = c(), donor_name = c())
+
+for(i in 1:nrow(tiss_tiss_donor_specific_skew_corrs)){
+
+  if(rownames(tiss_tiss_donor_specific_skew_corrs)[i] %in% c('Prostate','Testis')){next}
+  
+  all_tissue_corrs = c()
+  all_tissues_labels = c()
+  all_pairwise_labels = c()
+  all_snp_num = c()
+  all_donor_names = c()
+  for(j in 1:ncol(tiss_tiss_donor_specific_skew_corrs)){
+  
+    tissue_corrs = tiss_tiss_donor_specific_skew_corrs[[i,j]]
+    snp_num = tiss_tiss_donor_specific_snp_nums[[i,j]]
+    tissue_name_label = rep(rownames(tiss_tiss_donor_specific_skew_corrs)[i], length(tissue_corrs))
+    pairwise_name_label = rep(colnames(tiss_tiss_donor_specific_skew_corrs)[j], length(tissue_corrs))
+    donor_names = tiss_tiss_donor_names[[i,j]]
+    
+    all_tissue_corrs = c(all_tissue_corrs, tissue_corrs)
+    all_snp_num = c(all_snp_num, snp_num)
+    all_tissues_labels = c(all_tissues_labels, tissue_name_label)
+    all_pairwise_labels = c(all_pairwise_labels, pairwise_name_label)
+    all_donor_names = c(all_donor_names, donor_names)
+  }
+  
+  tissue_donor_specific_corr_df = data.frame(donor_specific_corrs =all_tissue_corrs, snp_num = all_snp_num, tissue_name = all_tissues_labels, 
+                                             pairwise_name = all_pairwise_labels, donor_name = all_donor_names )
+  #Set the diagonal to NA
+  tissue_donor_specific_corr_df$donor_specific_corrs[tissue_donor_specific_corr_df$pairwise_name ==rownames(tiss_tiss_donor_specific_skew_corrs)[i] ] = NA
+
+  #Save in one complete dataframe
+  all_tissue_donor_specific_corr_df = rbind(all_tissue_donor_specific_corr_df,tissue_donor_specific_corr_df)
+  
+  #Order by the mean correlation
+  median_corrs = tissue_donor_specific_corr_df %>% group_by(pairwise_name) %>% summarise_at(vars(donor_specific_corrs), ~median(., na.rm=TRUE))
+  median_corrs = median_corrs[order(median_corrs$donor_specific_corrs) , ]
+  tissue_level = as.character(median_corrs$pairwise_name)
+  tissue_donor_specific_corr_df$pairwise_name = factor(tissue_donor_specific_corr_df$pairwise_name, levels = tissue_level)
+  
+  g1 = ggplot(tissue_donor_specific_corr_df, aes(x = pairwise_name, y = donor_specific_corrs)) + geom_boxplot() + ylim(-1,1) + ylab('Donor specific SNP corrs') + xlab(' ') +
+    ggtitle(rownames(tiss_tiss_donor_specific_skew_corrs)[i]) + geom_hline(yintercept = 0, color = 'red') +
+    theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 90), 
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+          panel.border = element_rect(fill = NA, color = 'black', size = 1), panel.background = element_rect(fill = 'white'))
+  
+  print(g1)
+  
+}
+
+```
+
+
+```{r}
+
+all_tissue_donor_specific_corr_df
+
+```
+
+Get mean donor skews
+```{r}
+mean_donor_skews = aggregate(skew_and_stats_df$skew, list(skew_and_stats_df$donor), mean)
+```
+
+
+
+
+Perform fischers exact test for each tissue compared to all tissues for instances of switched versus non switched XCI
+Using the hypergeomtric distribution
+Need the total number of switch events
+Need number of instances of tissue
+Need number of switch events for that tissue
+Need total number of pairwise comparisons
+
+Will need to ignore the NA cases
+
+```{r}
+
+all_tissue_donor_specific_corr_df
+
+switch_df = all_tissue_donor_specific_corr_df[!is.na(all_tissue_donor_specific_corr_df$donor_specific_corrs), ]
+switch_df 
+
+```
+
+```{r}
+
+fet_xci_switch_pvalue = vector(mode = 'numeric', length = length(tissues))
+names(fet_xci_switch_pvalue) = tissues
+
+for(i in 1:length(tissues)){
+
+  test = tissues[i]
+  all_comp = dim(switch_df)[1]
+  tot_num_switch = sum(switch_df$donor_specific_corrs < 0)
+  tot_tissue = dim(switch_df[switch_df$tissue_name == test , ])[1]
+  tot_tissue_switch = dim(switch_df[switch_df$tissue_name == test & switch_df$donor_specific_corrs < 0 , ])[1]
+  fet_xci_switch_pvalue[i] = phyper(tot_tissue_switch-1, tot_num_switch, all_comp-tot_num_switch, tot_tissue ,lower.tail= FALSE)
+}
+
+hist(fet_xci_switch_pvalue)
+
+corr_fet_xci_switch_pvalue = p.adjust(fet_xci_switch_pvalue, method = 'BH')
+hist(corr_fet_xci_switch_pvalue)
+
+
+```
+```{r}
+corr_fet_xci_switch_pvalue[order(corr_fet_xci_switch_pvalue)]
+
+
+```
+
+
+Generate a ridge plot for a specific donor, plotting the distribution of correlations for each tissue, filter on the number of SNPs too
+Generate a few of these plots as examples
+Then report the number of donors that have a switched tissue or don't have a switched tissue
+Report the tissues that do switch and the number of donors they switch in.
+
+###########################
+Supplemental figure 7 panels a-c
+############################
+
+good example donors
+'1122O'
+'131XG'
+'1J1OQ'
+
+c('1122O', '131XG', '1J1OQ' )
+
+```{r}
+
+donor_name = '1122O'
+#Grab a donor
+donor_skew_dir_df = all_tissue_donor_specific_corr_df[all_tissue_donor_specific_corr_df$donor_name == donor_name, ]
+#Filter number of SNPs for each corr
+donor_skew_dir_df = donor_skew_dir_df[donor_skew_dir_df$snp_num >= 20, ]
+#Order tissues by their mean corr value
+mean_tiss_corr = aggregate(donor_skew_dir_df$donor_specific_corrs, list(donor_skew_dir_df$tissue_name), mean, na.rm = T )
+tiss_ordering = as.character(mean_tiss_corr[order(mean_tiss_corr$x), 'Group.1'])
+donor_skew_dir_df$tissue_name = factor(donor_skew_dir_df$tissue_name, levels =tiss_ordering )
+#Ridgeline plot across tissues
+g1 = ggplot(donor_skew_dir_df, aes(x = donor_specific_corrs, y = tissue_name)) + geom_density_ridges(
+  stat = "binline", bins = 20, scale = 1, draw_baseline = FALSE) +
+  geom_vline(xintercept = 0, color = 'red', size = 1) +
+  ggtitle(sprintf('Donor: %s',donor_name)) + ylab('tissue') + xlab('direction of XCI skew (shared cross-tissue SNP XCI ratio correlations)') +
+  theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 90), 
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(fill = NA, color = 'black', size = 1), panel.background = element_rect(fill = 'white'))
+g1
+
+
+
+```
+Pull out examples of the actual SNP correlations
+
+###########################
+Supplemental figure 7 panels a
+############################
+
+```{r}
+
+tissue_1 = 'Ovary'
+tissue_2 ='Vagina'
+donor = '1J1OQ'
+
+index_1 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_1
+index_2 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_2
+
+tissue_1_index = skew_and_stats_df$sample_index[index_1]
+tissue_2_index = skew_and_stats_df$sample_index[index_2]
+
+#Only use tissues that are skewed >= 0.6
+tiss_1_skew = skew_and_stats_df$skew[index_1]
+tiss_2_skew = skew_and_stats_df$skew[index_2]
+
+tissue_1_vcf = list.skew[[tissue_1_index]]
+tissue_2_vcf = list.skew[[tissue_2_index]]
+shared_snp_starts = tissue_1_vcf[ ,1][ (tissue_1_vcf[ ,1] %in%  tissue_2_vcf[ ,1]) & as.character(tissue_1_vcf[ ,'name']) %in% keep_genes ]
+tiss_1_ref_skew = tissue_1_vcf[ tissue_1_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+tiss_2_ref_skew = tissue_2_vcf[ tissue_2_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+
+par(pty = 's')
+plot(tiss_1_ref_skew, tiss_2_ref_skew, xlim = c(0,1), ylim = c(0,1), xlab = 'Ovary reference SNP XCI ratio', 
+     ylab = 'Vagina reference SNP XCI ratio')
+abline(a = 0, b = 1, col = 'red')
+
+
+tissue_1 = 'Ovary'
+tissue_2 ='Thyroid'
+donor = '1J1OQ'
+
+index_1 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_1
+index_2 = skew_and_stats_df$donor == donor & skew_and_stats_df$tissue == tissue_2
+
+tissue_1_index = skew_and_stats_df$sample_index[index_1]
+tissue_2_index = skew_and_stats_df$sample_index[index_2]
+
+#Only use tissues that are skewed >= 0.6
+tiss_1_skew = skew_and_stats_df$skew[index_1]
+tiss_2_skew = skew_and_stats_df$skew[index_2]
+
+tissue_1_vcf = list.skew[[tissue_1_index]]
+tissue_2_vcf = list.skew[[tissue_2_index]]
+shared_snp_starts = tissue_1_vcf[ ,1][ (tissue_1_vcf[ ,1] %in%  tissue_2_vcf[ ,1]) & as.character(tissue_1_vcf[ ,'name']) %in% keep_genes ]
+tiss_1_ref_skew = tissue_1_vcf[ tissue_1_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+tiss_2_ref_skew = tissue_2_vcf[ tissue_2_vcf[ ,1] %in% shared_snp_starts , 'C.1' ]
+
+
+par(pty = 's')
+plot(tiss_1_ref_skew, tiss_2_ref_skew, xlim = c(0,1), ylim = c(0,1), xlab = 'Ovary reference SNP XCI ratio', 
+     ylab = 'Thyroid reference SNP XCI ratio')
+abline(a = 0, b = 1, col = 'red')
+
+
+```
+
+
+
+
+
+For each donor, group by tissue and get the mean correlation. If negative, that tissue is generally oppositely skewed from other tissues in that donor. Get a count for each tissue for the number of donors that tissue is switched directions. 
+Use donors with at least 5
+
+
+```{r}
+tiss_start_count = rep(0, length = length(tissues))
+names(tiss_start_count) = tissues
+
+detected_tiss_counts = rep(0, length = length(tissues))
+names(detected_tiss_counts) = tissues
+
+for(j in all_donors){
+  donor_name = j
+  #Grab a donor
+  donor_skew_dir_df = all_tissue_donor_specific_corr_df[all_tissue_donor_specific_corr_df$donor_name == donor_name, ]
+  #Filter number of SNPs for each corr
+  donor_skew_dir_df = donor_skew_dir_df[donor_skew_dir_df$snp_num >= 20, ]
+  #If no correlations left, skip
+  if(nrow(donor_skew_dir_df) == 0){next}
+  #Order tissues by their mean corr value
+  mean_tiss_corr = aggregate(donor_skew_dir_df$donor_specific_corrs, list(donor_skew_dir_df$tissue_name), mean, na.rm = T )
+  #Check there are at least 5 tissues for the donor
+  if(length(mean_tiss_corr$Group.1) < 5){next}
+  #Add the deteted counts
+  for(i in 1:length(mean_tiss_corr$Group.1)){
+    index = names(detected_tiss_counts) == mean_tiss_corr$Group.1[i]
+    detected_tiss_counts[index] = detected_tiss_counts[index] + 1
+  }
+
+  #Get the swapped direction tissues
+  swap_index = mean_tiss_corr$x < 0
+  swap_index[is.na(swap_index)] = FALSE
+  swapped_tiss = mean_tiss_corr[swap_index, 'Group.1']
+  #Ignorre if no swapping
+  if(length(swapped_tiss) == 0){next}
+  #Add the counts
+  for(i in 1:length(swapped_tiss)){
+    index = names(tiss_start_count) == swapped_tiss[i]
+    tiss_start_count[index] = tiss_start_count[index] + 1
+  }
+
+}
+
+
+```
+
+
+###########################
+Supplemental figure 7 panels d
+############################
+
+```{r}
+
+par(mar=c(9,4,4,1))
+proportion_swapped = tiss_start_count / detected_tiss_counts
+proportion_swapped = proportion_swapped[order(proportion_swapped, decreasing = T)]
+barplot(proportion_swapped, las = 2, cex.names = .5, ylab = c('Proportion of donors tissue switched XCI directions'))
+
+```
+
+
+
+Plot the proportion swapped against the estimated tissue lineage numbers
+
+```{r}
+load('/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/cell_num_estimates/tissue_specific_lineage_cell_num_ests_df.Rdata')
+est_tissue_lineage_cell_num_df
+
+```
+
+
+###########################
+Supplemental figure 7 panel d
+############################
+
+```{r}
+present_index = est_tissue_lineage_cell_num_df$tissues %in% names(proportion_swapped)
+temp_lineage_df = est_tissue_lineage_cell_num_df[present_index, ]
+index = match(names(proportion_swapped), as.character(temp_lineage_df$tissues))
+estimated_tiss_cell_num = temp_lineage_df$est_n[index]
+
+par(pty = 's')
+plot(estimated_tiss_cell_num,proportion_swapped, ylab = 'Liklihood tissue changes XCI direction', xlab = 'Estimated cell # for tissue-specific lineage'  )
+```
+
+
+
+

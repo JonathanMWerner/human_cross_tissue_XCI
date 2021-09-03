@@ -4,11 +4,12 @@
 library(ggplot2)
 library(ggrepel)
 library(reshape2)
+library(parallel)
 ```
 
 
 
-Looking at the SNP - level skew distributions of known escape genes commpared to the estimated tissue skews
+Looking at the SNP - level skew distributions of known escape genes compared to the estimated tissue skews
 
 
 First go through the vcfs and pull out only the known escape genes
@@ -16,7 +17,7 @@ First go through the vcfs and pull out only the known escape genes
 
 ```{r}
 
-tukiainen_escape_meta = read.table(file = '/home/werner/collabs/entex_Xchrom/code/tukiainen_study.txt', header = TRUE, sep = '\t')
+tukiainen_escape_meta = read.table(file = '../data/tukiainen_study.txt', header = TRUE, sep = '\t')
 tukiainen_escape_meta = tukiainen_escape_meta[1:683, ] #Random row at the end
 tukiainen_escape_meta 
 table(tukiainen_escape_meta$Reported.XCI.status)
@@ -28,85 +29,31 @@ escape_genes = as.character(tukiainen_escape_meta$Gene.name[as.character(tukiain
 
 Tissue estimated skews
 ```{r}
-load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_mod_stat_filt_1_20_21.skew.est.max.genes.Rdata")
+load("../data/all_v8_GATK.skew.est.max.genes.Rdata")
 
 ```
 
 Has the list of genes we kept and the possible escape genes
 ```{r}
-load('/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/gene_skew_to_tissue_skew_correlations_v8.Rdata')
+load('../data/gene_skew_to_tissue_skew_correlations_v8.Rdata')
 
 ```
 
-
-
-
-```{r}
-possible_escape = unique(as.character(bad_gene_skew_df$gene_name))
-possible_escape
-
-keep_genes = keep_genes[!keep_genes %in% possible_escape]
-
-```
-
-See where the putative escape genes are in the tukainen data
-```{r}
-
-var_esc_genes = as.character(tukiainen_escape_meta$Gene.name[as.character(tukiainen_escape_meta$Reported.XCI.status) == 'Variable'])
-unknown_genes = as.character(tukiainen_escape_meta$Gene.name[as.character(tukiainen_escape_meta$Reported.XCI.status) == 'Unknown'])
-inact_genes = as.character(tukiainen_escape_meta$Gene.name[as.character(tukiainen_escape_meta$Reported.XCI.status) == 'Inactive'])
-
-
-possible_escape[possible_escape %in% var_esc_genes]
-
-possible_escape[possible_escape %in% unknown_genes]
-
-possible_escape[possible_escape %in% inact_genes]
-```
 
 Save the ensembl IDs for my list of inactive genes, the escape genes, and the putative escape genes
 
 ```{r}
-load("/data/genomes/human/gene_annotations_v25.Rdata")
+load("../data/gene_annotations_v25.Rdata")
 head(attr)
 
 ```
 
+
+Load the estimated tissue skews, which were calculated without the escape gene skews
 ```{r}
-ensem_poss_esc = as.character(attr$ensemblID[attr$name %in% possible_escape])
-write.csv(ensem_poss_esc, '/home/werner/xchrom_snp_skew/code/escape_gene_ensembl/putative_escape_gene_ensembl.txt', row.names = FALSE, col.names = FALSE, quote = FALSE)
-
-ensem_escape = as.character(attr$ensemblID[attr$name %in% escape_genes])
-write.csv(ensem_escape, '/home/werner/xchrom_snp_skew/code/escape_gene_ensembl/escape_gene_ensembl.txt', row.names = FALSE, col.names = FALSE, quote = FALSE)
-
-ensem_inactive = as.character(attr$ensemblID[attr$name %in% keep_genes])
-write.csv(ensem_inactive, '/home/werner/xchrom_snp_skew/code/escape_gene_ensembl/inactive_gene_ensembl.txt', row.names = FALSE, col.names = FALSE, quote = FALSE)
-
-
-
+load("../data/v8_GTEx_skew_and_stats_df.Rdata")
 
 ```
-
-
-
-
-
-
-Test the escape genes are in the data set
-```{r}
-k = 22
-escape_genes[k]
-sum(unlist(lapply(1:length(list.skew.max), function(i) sum(list.skew.max[[i]]$name == escape_genes[k]))))
-
-
-```
-
-Load the estimated tissue skews, which were calculated without these gene skews
-```{r}
-load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/v8_final_filtering_skew_and_stats_1_20_21_escape_filt_df.Rdata")
-
-```
-
 
 
 Only grab the escape genes
@@ -123,52 +70,16 @@ length(list.skew.escape)
 
 save the escape data
 ```{r}
-save(list.skew.escape, file = "/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/only_escape_v8_GATK_mod_stat_filt_1_20_21.skew.est.max.genes.Rdata")
+save(list.skew.escape, file = "../data/only_escape_v8_GTEx.skew.est.max.genes.Rdata")
 
 
 ```
 
 ```{r}
-load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/only_escape_v8_GATK_mod_stat_filt_1_20_21.skew.est.max.genes.Rdata")
+load("../data/only_escape_v8_GTEx.skew.est.max.genes.Rdata")
 ```
 
 
-```{r}
-num_escape = vector(mode = 'numeric', length = length(list.skew.escape))
-for(i in 1:length(list.skew.escape)){
-  if(is.null(dim(list.skew.escape[[i]])[1])){
-    num_escape[i] = 0
-  }else{
-    num_escape[i] = dim(list.skew.escape[[i]])[1]
-  }
-}
-
-hist(num_escape)
-
-```
-
-
-```{r}
-col2rgb(col = c('black','blue','red'))
-
-```
-
-
-Look at the tissue's each bad gene is expressed in
-
-```{r}
-for(i in 1:length(possible_escape)){
-
-  gene_index = bad_gene_skew_df$sample_index[bad_gene_skew_df$gene_name ==  possible_escape[i]]
-  
-  expressed_in_tissue = skew_and_stats_df$tissue[skew_and_stats_df$sample_index %in% gene_index]
-  g = ggplot(as.data.frame(table(expressed_in_tissue)), aes(x=expressed_in_tissue, y = Freq)) + geom_bar(stat="identity") +
-    ggtitle( possible_escape[i]) + ylab('# samples gene is expressed') +
-    theme(axis.text.x = element_text(angle = 90), plot.title = element_text(hjust = .5), axis.title.x = element_blank())
-  print(g)
-  
-}
-```
 
 
 Get escape gene to tissue skew correlations for the known escape genes
@@ -185,11 +96,6 @@ folded <- function(x) { apply( cbind(x,1-x), 1, max)}
 unfold <- function(x) { c(x,1-x) } 
 ```
 
-
-```{r}
-escape_genes
-
-```
 
 
 ```{r}
@@ -364,17 +270,6 @@ ggplot(escape_skew_corr_df, aes(x = skew_rank, y = correlation_to_tissue_skew)) 
         axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), 
         axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12), 
         legend.position = 'none', panel.background = element_rect(fill = 'white')) 
-#ggsave(filename = 'ranked_gene_skew_to_tissue_skew_correlation.pdf', path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/', device = 'pdf', 
-#       dpi = 300, height = 4, width = 6, useDingbats = FALSE)
-
-
-ggplot(escape_skew_corr_df, aes(x = avg_expression, y = correlation_to_tissue_skew)) + geom_point(alpha = .5) +
-  ylim(0,1) + ylab('Gene-Tissue skew correlation') + xlab('Average expression') + ggtitle('Higher expression increases gene-tissue skew correlation') +
-  theme(plot.title = element_text(hjust = .5), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-        panel.border = element_rect(colour = "black", fill=NA, size=1), 
-        axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), 
-        axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12), legend.position = 'none')
-
 
 ```
 
@@ -400,21 +295,21 @@ save the dataframe
 ```{r}
 
 save(comb_gene_skew_corr_df,
-     file = '/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/escape_and_inactive_skew_to_tissue_skew_correlations_v8.Rdata')
+     file = '../data/escape_and_inactive_skew_to_tissue_skew_correlations_v8.Rdata')
 
 ```
 
 ```{r}
-load('/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/escape_and_inactive_skew_to_tissue_skew_correlations_v8.Rdata')
+load('../data/escape_and_inactive_skew_to_tissue_skew_correlations_v8.Rdata')
 
 ```
 
-```{r}
 
-comb_gene_skew_corr_df
 
-```
 
+########################
+Figure 3 panel b
+#######################
 
 ```{r}
 
@@ -437,20 +332,9 @@ ggplot(comb_gene_skew_corr_df, aes(x = skew_rank, y = correlation_to_tissue_skew
         axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12), 
         panel.background = element_rect(fill = 'white')) 
 
-#ggsave(filename = 'ranked_gene_skew_to_tissue_skew_correlation_with_escape.pdf', path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/', device = 'pdf', 
-#       dpi = 300, height = 4, width = 6, useDingbats = FALSE)
-```
-
-```{r}
-dim(comb_gene_skew_corr_df)
 
 ```
 
-```{r}
-table(comb_gene_skew_corr_df$escape_label)
-
-
-```
 
 Get the percentile XIST and TSIX are in.
 ```{r}
@@ -462,11 +346,10 @@ all_other_corrs = comb_gene_skew_corr_df$correlation_to_tissue_skew[comb_gene_sk
 
 ```
 
+#################################
+Figure 3 panel c
+#################################
 
-
-
-
-Only run this once, changing the 
 
 ```{r}
 #Order by log10(avg_expression) for binning
@@ -498,19 +381,10 @@ ggplot(comb_gene_skew_corr_df, aes(x =bin_label, y = correlation_to_tissue_skew,
         panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
         panel.border = element_rect(colour = "black", fill=NA, size=1), 
         panel.background = element_rect(fill = 'white'))
-#ggsave(path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/', filename = 'gene_skew_to_tissue_skew_binned_boxplots_with_escape.pdf', device = 'pdf', 
-#       dpi = 300, width = 6, height = 4, units = 'in', useDingbats = FALSE)
-
 
 
 ```
 
-
-```{r}
-
-ggplot(comb_gene_skew_corr_df, aes(x = avg_expression, y = correlation_to_tissue_skew, color = escape_label)) + geom_point()
-
-```
 
 Reevaluate the possible escape and known inactive genes. Only use the most confident examples.
 
@@ -557,7 +431,7 @@ length(detected_escape_genes)
 
 load in again the max snps per sample that includes the escapes genes too
 ```{r}
-load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/all_v8_GATK_mod_stat_filt_1_20_21.skew.est.max.genes.Rdata")
+load("../data/all_v8_GATK.skew.est.max.genes.Rdata")
 
 ```
 
@@ -651,13 +525,6 @@ test_inactive_gene_stats = get_escape_pval_stats(test_genes, null_genes, list.sk
 test_inactive_gene_stats
 ```
 
-```{r}
-
-test_genes
-
-```
-
-
 
 ```{r}
 filt_test_inactive = c()
@@ -667,7 +534,7 @@ for(i in 1:length(test_genes)){
   if(sum(temp_df$num_conf_genes >= 30) < 30){next} 
   filt_test_inactive = c(filt_test_inactive, gene)
   temp_df = temp_df[temp_df$num_conf_genes>=30, ]
-  g1 = ggplot(temp_df, ae5s(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
+  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
     ggtitle(gene) + xlab('p-value') +
     theme(plot.title=element_text(hjust=.5, size=15), 
       axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
@@ -676,21 +543,13 @@ for(i in 1:length(test_genes)){
       panel.border = element_rect(colour = "black", fill=NA, size=1), 
       panel.background = element_rect(fill = 'white'))
   suppressWarnings(print(g1))
-  file_name = sprintf('test_gene_%s_powered_pvalue_dist.pdf', gene)
-  ggsave(plot = g1, path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename = file_name, device = 'pdf', 
-       dpi = 300, width = 4, height = 4, units = 'in', useDingbats = FALSE)
+  #file_name = sprintf('test_gene_%s_powered_pvalue_dist.pdf', gene)
+  #ggsave(plot = g1, path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename = file_name, device = 'pdf', 
+  #     dpi = 300, width = 4, height = 4, units = 'in', useDingbats = FALSE)
 }
 ```
 
 Now for each gene, calculate the p-value distribution deviation from the uniform distribution. As a proxy for a goodness of fit test
-'SYN1'
-'SAT1'
-'DMD'
-
-```{r}
-length(names(table(test_inactive_gene_stats$gene)))
-
-```
 
 
 Filter out low powered pvalues and get a new list of the test genes
@@ -700,13 +559,6 @@ length(names(table(test_inactive_gene_stats$gene)))
 test_genes =names(table(test_inactive_gene_stats$gene))
 
 ```
-
-```{r}
-table(table(test_inactive_gene_stats$gene) <= 1)
-hist(test_inactive_gene_stats$num_conf_genes)
-test_inactive_gene_stats
-```
-
 
 
 
@@ -731,8 +583,6 @@ for(i in 1:length(test_genes)){
 plot(test_num_samples,test_dev_unif )
 
 ```
-
-
 
 
 Test the null inactive genes and the escape, see what their uniform deviance looks like
@@ -812,12 +662,6 @@ plot(escape_num_samples,escape_dev_unif )
 
 ```
 
-```{r}
-is.na(null_genes)
-
-```
-
-
 
 Get rid of any genes that were filtered out
 
@@ -827,7 +671,7 @@ index = null_num_samples != 0
 null_num_samples = null_num_samples[index]
 null_dev_unif = null_dev_unif[index]
 
-names(null_dev_unif) == names(null_num_samples)
+
 
 
 ```
@@ -836,7 +680,7 @@ index = test_num_samples != 0
 test_num_samples = test_num_samples[index]
 test_dev_unif = test_dev_unif[index]
 
-names(test_dev_unif) == names(test_num_samples)
+
 
 
 ```
@@ -861,16 +705,11 @@ points(test_num_samples,test_dev_unif, col = 'blue' )
 ```
 
 
-Fit an exponential decay function to the inactive data, should work better than random thresholds, easier to explain too
+Fit an exponential decay function to the inactive data, will work better than random thresholds
 
-
-```{r}
-#names(null_num_samples)
-names(null_dev_unif)
-
-```
-
-
+##############################
+Supplemental figure 4 panel b
+#############################
 
 ```{r}
 
@@ -892,16 +731,21 @@ model = nls(y ~ alpha * exp(beta * x) + theta , data = data.df, start = start)
 fitted_pars = model$m$getPars()
 model$m$setPars(newPars = c(fitted_pars[1], fitted_pars[2], 25))
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/inactive_genes_uni_dev_with_exp_fit.pdf',
-#   height = 5, width = 5, useDingbats = F)
+
 par(pty = 's')
 # Plot fitted curve
-plot(data.df$x, data.df$y, xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = null_points, cex = .75)
+plot(data.df$x, data.df$y, xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75)
 lines(data.df$x , predict(model, list(x = data.df$x)), col = 'black', lwd = 3, lty = 2)
 legend('topright', c('Verified inactive'), col = c('black'), pch = c(1,1))
-#dev.off()
 
 ```
+
+
+
+
+##############################
+Figure 3 panel d
+#############################
 
 
 ```{r}
@@ -915,36 +759,35 @@ red_alpha = rgb(col_vec[1,1],col_vec[2,1],col_vec[3,1],max = 255, alpha = 125, n
 
 ```{r}
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/inactive_GRIPAP1_uniform_pval_devs.pdf', 
-#    height = 4, width = 4, useDingbats = F)
+
 par(pty = 's')
 null_gene = 'GRIPAP1'
 null_pvals = null_inactive_gene_stats$escape_pvalue[null_inactive_gene_stats$gene == null_gene]
 hist(seq(.025,1,.025), breaks = seq(0,1,.025), freq = F, ylim = c(0, 12), col = grey_alpha, xlab = 'p-value', main = null_gene)
 hist(null_pvals, breaks = seq(.0,1,.025), freq = F, col = black_alpha, add = T)
 legend('topright', c('uniform','inactive gene'), fill = c(grey_alpha, black_alpha))
-#dev.off()
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/escape_TRAPPC2_uniform_pval_devs.pdf', 
-#    height = 4, width = 4, useDingbats = F)
+
 par(pty = 's')
 escape_gene_1 = 'TRAPPC2'
 escape_pvals = escape_gene_stats$escape_pvalue[escape_gene_stats$gene == escape_gene_1]
 hist(seq(.025,1,.025), breaks = seq(0,1,.025), freq = F, ylim = c(0, 12), col = grey_alpha, xlab = 'p-value', main = escape_gene_1)
 hist(escape_pvals, breaks = seq(.0,1,.025), freq = F, col = red_alpha, add = T)
 legend('topright', c('uniform','escape gene'), fill = c(grey_alpha, red_alpha))
-#dev.off()
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/escape_PLXNB3_uniform_pval_devs.pdf', 
-#    height = 4, width = 4, useDingbats = F)
+
 par(pty = 's')
 escape_gene_2 = 'PLXNB3'
 escape_pvals = escape_gene_stats$escape_pvalue[escape_gene_stats$gene == escape_gene_2]
 hist(seq(.025,1,.025), breaks = seq(0,1,.025), freq = F, ylim = c(0, 12), col = grey_alpha, xlab = 'p-value', main = escape_gene_2)
 hist(escape_pvals, breaks = seq(.0,1,.025), freq = F, col = red_alpha, add = T)
 legend('topright', c('uniform','escape gene'), fill = c(grey_alpha, red_alpha))
-#dev.off()
+
 ```
+
+##############################
+Figure 3 panel d, Supplemental figure 4 panel b
+#############################
 
 ```{r}
 x_annot = c(null_num_samples[null_gene],escape_num_samples[escape_gene_1], escape_num_samples[escape_gene_2]) 
@@ -956,45 +799,40 @@ escape_points[names(escape_num_samples)%in% annot_genes] = 19
 null_points = c(rep(1, length(null_num_samples)))
 null_points[names(null_num_samples)%in% annot_genes] = 19
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/inactive_and_known_escape_uniform_pval_devs.pdf', 
-#    height = 5, width = 5, useDingbats = F)
+
 par(pty = 's')
 plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = null_points, cex = .75 )
 points(escape_num_samples,escape_dev_unif, col = 'red', pch = escape_points )
 legend('topright', c('Escape genes', 'Inactive genes'), col = c('red','black'), pch = c(1,1))
 text(x_annot, y_annot, labels = c(null_gene, escape_gene_1, escape_gene_2), cex = .9, pos = c(1,3,3), col = c('black', 'red', 'red') )
-#dev.off()
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/inactive_and_known_escape_uniform_pval_devs_with_exp_fit.pdf',
-#height = 5, width = 5, useDingbats = F)
 par(pty = 's')
 plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = null_points, cex = .75 )
 lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
 points(escape_num_samples,escape_dev_unif, col = 'red', pch = escape_points )
 legend('topright', c('Escape genes', 'Inactive genes'), col = c('red','black'), pch = c(1,1))
 text(x_annot, y_annot, labels = c(null_gene, escape_gene_1, escape_gene_2), cex = .9, pos = c(1,3,3), col = c('black', 'red', 'red') )
-#dev.off()
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/inactive_and_poss_inactive_uniform_pval_devs.pdf',
-#   height = 5, width = 5, useDingbats = F)
 par(pty = 's')
 plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
 points(test_num_samples, test_dev_unif, col = '#0081ff', pch = 1 )
 legend('topright', c('Putative inactive', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-#dev.off()
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/inactive_and_poss_inactive_uniform_pval_devs_with_exp_fit.pdf',
-#   height = 5, width = 5, useDingbats = F)
 par(pty = 's')
 plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
 lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
 points(test_num_samples, test_dev_unif, col = '#0081ff', pch = 1 )
 legend('topright', c('Putative inactive', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-#dev.off()
+
 ```
 
 
 Get the genes that are above the model and have at least 50 pvalue in their distribution
+
+##############################
+Supplemental figure 4 panel b
+#############################
+
 
 ```{r}
 model_y = predict(model, list(x = test_num_samples))
@@ -1003,23 +841,19 @@ conf_inactive = which(test_dev_unif <= model_y & test_num_samples >= 50)
 
 length(novel_escape)
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/novel_escape_uni_dev_with_exp_fit.pdf',
-#   height = 5, width = 5, useDingbats = F)
 par(pty = 's')
 plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
 lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
 points(test_num_samples[novel_escape], test_dev_unif[novel_escape], col = '#0081ff', pch = 1 )
 legend('topright', c('Novel escape', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-#dev.off()
 
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/conf_inactive_uni_dev_with_exp_fit.pdf',
-#   height = 5, width = 5, useDingbats = F)
+
 par(pty = 's')
 plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
 lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
 points(test_num_samples[conf_inactive], test_dev_unif[conf_inactive], col = '#0081ff', pch = 1, )
 legend('topright', c('Confident inactive', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-#dev.off()
+
 
 ```
 
@@ -1034,6 +868,10 @@ genes_to_plot
 
 ```
 
+################################################
+Supplemental Figure 5 panel c
+#############################################
+
 
 ```{r}
 
@@ -1049,14 +887,12 @@ for(i in 1:length(genes_to_plot)){
       panel.border = element_rect(colour = "black", fill=NA, size=1), 
       panel.background = element_rect(fill = 'white'))
   suppressWarnings(print(g1))
-  
-  file_name = sprintf('test_gene_%s_powered_pvalue_dist.pdf', gene)
-  ggsave(plot = g1, path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename = file_name, device = 'pdf', 
-       dpi = 300, width = 4, height = 4, units = 'in', useDingbats = FALSE)
+
 }
 
 ```
 
+Calling genes that have a 1 p-value pile up as imprinted, can't really say that without having the actual parental haplotypes. Not going to pursue putative imprinted X genes
 
 
 ```{r}
@@ -1065,45 +901,6 @@ novel_escape = genes_to_plot[!genes_to_plot %in% c(imprinted)]
 length(novel_escape)
 ```
 
-Add the rest of the inactive genes with low uniform deviation
-```{r}
-genes_to_plot = c(names(conf_inactive))
-```
-```{r}
-for(i in 1:length(genes_to_plot)){
-  gene = genes_to_plot[i]
-  temp_df = test_inactive_gene_stats[test_inactive_gene_stats$gene == gene, ]
-  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
-    ggtitle(gene) + xlab('p-value') +
-    theme(plot.title=element_text(hjust=.5, size=15), 
-      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
-      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
-      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-      panel.border = element_rect(colour = "black", fill=NA, size=1), 
-      panel.background = element_rect(fill = 'white'))
-  suppressWarnings(print(g1))
-}
-
-```
-
-Look for imprrinted known escpae genes
-
-```{r}
-for(i in 1:length(escape_num_samples)){
-  gene = names(escape_num_samples[i])
-  temp_df = escape_gene_stats[escape_gene_stats$gene == gene, ]
-  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
-    ggtitle(gene) + xlab('p-value') +
-    theme(plot.title=element_text(hjust=.5, size=15), 
-      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
-      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
-      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-      panel.border = element_rect(colour = "black", fill=NA, size=1), 
-      panel.background = element_rect(fill = 'white'))
-  suppressWarnings(print(g1))
-}
-
-```
 
 
 Filter the stats for only the well powered genes, # pvalues >= 50
@@ -1127,11 +924,6 @@ escape_keep_genes = names(escape_num_samples[escape_num_samples >= 50])
 
 ```
 
-
-```{r}
-table(test_inactive_gene_stats$gene %in% novel_escape)
-
-```
 
 
 
@@ -1166,6 +958,11 @@ table(comb_escape_conf_inactive_stats$escape_label)
 ```
 
 
+########################################
+Figure 3 panel e
+########################################
+
+
 ```{r}
 
 
@@ -1179,10 +976,7 @@ ggplot(comb_escape_conf_inactive_stats , aes(x = escape_pvalue)) +
       panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
       panel.border = element_rect(colour = "black", fill=NA, size=1), 
       panel.background = element_rect(fill = 'white'))
-  
 
-  ggsave(path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename ='combined_classified_pvalue_escape_distrs.pdf' , device = 'pdf', 
-       dpi = 300, width = 8, height = 4, units = 'in', useDingbats = FALSE)
 ```
 
 ```{r}
@@ -1224,7 +1018,7 @@ length(names(tab))
 
 save the combined dataset
 ```{r}
-save(comb_escape_conf_inactive_stats, file = '/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/escape_pval_v8_df.Rdata')
+save(comb_escape_conf_inactive_stats, file = '../data/escape_pval_v8_df.Rdata')
 ```
 
 Plot individual gene pval densitys for supplemental
@@ -1232,12 +1026,16 @@ Plot individual gene pval densitys for supplemental
 
 ```{r}
 
-load('/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/escape_pval_v8_df.Rdata')
+load('../data/escape_pval_v8_df.Rdata')
 
 ```
 
 Save as a text file the escape classifications
 ignore the imprinted classification
+
+###############################
+Supplemental table 1
+###############################
 
 ```{r}
 escape_class_df = comb_escape_conf_inactive_stats[!duplicated(comb_escape_conf_inactive_stats$gene), ]
@@ -1254,387 +1052,7 @@ escape_class_df = escape_class_df[order(escape_class_df$escape_label), ]
 ```{r}
 
 
-write.table(escape_class_df, file = '/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/gene_escape_table.txt', row.names = F, sep='\t', quote = F)
+write.table(escape_class_df, file = '../data/gene_escape_table.txt', row.names = F, sep='\t', quote = F)
 
 ```
-
-
-
-```{r}
-table(comb_escape_conf_inactive_stats$escape_label)
-
-```
-
-
-
-
-
-Look at the verified inactive genes from the tukainen paper see how it compares
-
-
-```{r}
-detected_inactive_num_samp = sapply(1:length(inact_genes), function(j) sum(unlist(lapply(1:length(list.skew.max), function(i) inact_genes[j] %in% list.skew.max[[i]]$name ))))
-detected_inactive = inact_genes[which(detected_inactive_num_samp > 5)]
-```
-
-```{r}
-length(detected_inactive)
-
-```
-
-
-```{r}
-tuk_null_inactive_gene_stats = get_escape_pval_stats(detected_inactive, detected_inactive, list.skew.max, skewed_sample_index, skew_and_stats_df)
-tuk_escape_gene_stats = get_escape_pval_stats(detected_escape_genes, detected_inactive, list.skew.max, skewed_sample_index, skew_and_stats_df)
-
-
-tuk_null_dev_unif = vector(mode = 'numeric', length = length(detected_inactive))
-tuk_null_num_samples = vector(mode = 'numeric', length = length(detected_inactive))
-names(tuk_null_dev_unif) = detected_inactive
-names(tuk_null_num_samples) = detected_inactive
-
-for(i in 1:length(detected_inactive)){
-
-  tuk_null_pval_distribution = tuk_null_inactive_gene_stats$escape_pvalue[tuk_null_inactive_gene_stats$gene == detected_inactive[i]]
-  if(length(tuk_null_pval_distribution) <=1){next}
-  #Bin the pvalues in .025
-  percentile = as.numeric(seq(0,1,.025))
-  hist_temp = hist(tuk_null_pval_distribution, breaks = percentile,plot = F )
-  #Get the deviation from the uniform distribution, density is just 1 per bin
-  tuk_null_dev_unif[i] = sum(abs(1 - hist_temp$density))
-  tuk_null_num_samples[i] = length(tuk_null_pval_distribution)
-}
-
-plot(tuk_null_num_samples,tuk_null_dev_unif )
-
-
-tuk_escape_dev_unif = vector(mode = 'numeric', length = length(detected_escape_genes))
-tuk_escape_num_samples = vector(mode = 'numeric', length = length(detected_escape_genes))
-names(tuk_escape_dev_unif) = detected_escape_genes
-names(tuk_escape_num_samples) = detected_escape_genes
-
-for(i in 1:length(detected_escape_genes)){
-
-  escape_pval_distribution = tuk_escape_gene_stats$escape_pvalue[escape_gene_stats$gene == detected_escape_genes[i]]
-  if(length(escape_pval_distribution) <=1){next}
-  #Bin the pvalues in .025
-  percentile = as.numeric(seq(0,1,.025))
-  hist_temp = hist(escape_pval_distribution, breaks = percentile,plot = F )
-  #Get the deviation from the uniform distribution, density is just 1 per bin
-  tuk_escape_dev_unif[i] = sum(abs(1 - hist_temp$density))
-  tuk_escape_num_samples[i] = length(escape_pval_distribution)
-}
-
-plot(tuk_escape_num_samples,tuk_escape_dev_unif )
-
-```
-
-```{r}
-
-plot(tuk_null_num_samples,tuk_null_dev_unif, ylim =c(0,80), xlim = c(0,1100) )
-points(null_num_samples,null_dev_unif, col = 'red')
-```
-
-
-
-
-
-
-SASH3
-BTK
-CXorf36
-```{r}
-table('CXorf36'%in% var_esc_genes)
-```
-
-
-```{r}
-
-new_escape = c('SASH3', 'RPLL36A', 'BTK','ARHGAP4', 'CXorf36', 'MPP1', 'SEPT6', 'PGK1', 'F8', 'CLIC2' , 'WDR45', 'ANOS1', 'NLGN4X', 'STARD8','CTPS2', 'MCTS1', 'TMEM187', 'WDR44')
-verified_inactive = c('TMSB4X','PLP1', 'MSN', 'TSC22D3', 'BEX1' , 'PLS3', 'TSPYL2', 'TCEAL2', 'PDZD4', 'USP11', 'BEX2', 'RP5-972B16.2', 'PNMA3', 
-                      'MIR503HG','TMEM47', 'SLC6A8' , 'HEPH', 'DMD', 'GPC4','PLXNA3' , 'ARHGEF6', 'PIR', 'EMD', 'ARMCX5-GPRASP2', 'ARAF', 'ACOT9', 
-                      'MID1IP1', 'TREX2','CXorf40B', 'CUL4B', 'MECP2', 'RP11-1148L6.5' , 'MAMLD1', 'ATRX','CASK','OPHN1' )
-x_imprinted = c('SYN1','PCSK1N', 'COL4A6', 'SAT1', 'VSIG4', 'CHRDL1', 'ZNF185', 'ITM2A', 'EFNB1', 'PRPS2', 'RGN')
-
-```
-
-```{r}
-filt_index = test_inactive_gene_stats$gene %in% filt_test_inactive & test_inactive_gene_stats$num_conf_genes >= 30
-filt_test_inactive_gene_stats =test_inactive_gene_stats[filt_index,  ]
-
-escape_label = rep('new escape', dim(filt_test_inactive_gene_stats)[1])
-escape_label[filt_test_inactive_gene_stats$gene %in% verified_inactive] = 'verified inactive'
-escape_label[filt_test_inactive_gene_stats$gene %in% x_imprinted] = 'putative X imprinted'
-filt_test_inactive_gene_stats$escape_label = escape_label
-filt_test_inactive_gene_stats
-```
-
-```{r}
-filt_test_inactive_gene_stats[filt_test_inactive_gene_stats$gene == 'CXorf36', ]
-
-```
-
-
-
-```{r}
-
-#pdf(file = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/example_pvalue_generation.pdf', height = 4, width = 4, useDingbats = F)
-
-known_escape_gene = 'ARSD'
-sample = list.skew.max[[4392]]
-#Calculate absolute deviation from .5
-all_gene_dev = abs(.5 - sample$C.1)
-escape_gene_dev = all_gene_dev[sample$name %in% detected_escape_genes]
-#Grab gene of interest dev
-test_gene_dev = all_gene_dev[sample$name == 'CXorf36']
-escape_gene_dev = all_gene_dev[sample$name == known_escape_gene]
-conf_inactive_dev = all_gene_dev[sample$name %in% conf_inactive_genes]
-hist(conf_inactive_dev, breaks = seq(0,.5,.01), xlim = c(0,.5), col = 'grey', xlab = 'abs( gene skew deviation from .5 )', main = 'Heart - Atrial Appendage' )
-hist(escape_gene_dev, breaks = seq(0,.5,.01), xlim = c(0,.5),col = 'blue', add = T)
-hist(test_gene_dev, breaks = seq(0,.5,.01), xlim = c(0,.5),col = 'red', add = T)
-legend("topright", c("confident inactive", "known escape", 'test gene'), col=c("grey", "blue", 'red'), lwd=5, cex = .5)
-#dev.off()
-
-message('test gene pvalue: ', sum(conf_inactive_dev <= test_gene_dev) / length(conf_inactive_dev))
-message('known escape pvalue: ', sum(conf_inactive_dev <= escape_gene_dev) / length(conf_inactive_dev))
-```
-
-```{r}
-as.character(sample$name[sample$name %in% detected_escape_genes])
-
-```
-
-
-
-
-Do the same for the known escape genes
-
-```{r}
-all_test_gene_pvalues = c()
-all_test_gene_num_genes = c()
-all_test_gene_tissues = c()
-all_test_gene_sample_id = c()
-all_test_gene_names = c()
-
-for(j in 1:length(detected_escape_genes)){
-  
-  #Get the test gene
-  test_gene = detected_escape_genes[j]
-  #Get the samples that have the gene and are appropriately skewed
-  present_index = unlist(lapply(1:length(list.skew.max), function(i) sum(list.skew.max[[i]]$name == test_gene) > 0))
-  present_index = which(present_index != 0)
-  final_sample_index = present_index[present_index %in% skewed_sample_index]
-  #Subset the data
-  present.list.skew.max = list.skew.max[final_sample_index]
-  #Calculate pvalues using the conf inactive genes as the null distribution
-  test_gene_pvalues = vector(mode = 'numeric', length = length(present.list.skew.max))
-  test_num_genes = vector(mode = 'numeric', length = length(present.list.skew.max))
-  test_gene_tissue = vector(mode = 'numeric', length = length(present.list.skew.max))
-  test_gene_sample_index = vector(mode = 'numeric', length = length(present.list.skew.max))
-  for(i in 1:length(present.list.skew.max)){
-    sample = present.list.skew.max[[i]]
-    #Calculate absolute deviation from .5
-    all_gene_dev = abs(.5 - sample$C.1)
-    #Grab gene of interest dev
-    test_gene_dev = all_gene_dev[sample$name == test_gene]
-    #Grab all the confident inactive gene devs
-    conf_inactive_dev = all_gene_dev[sample$name %in% conf_inactive_genes]
-    #Number of genes used in sample for pvalue
-    num_genes = length(conf_inactive_dev)
-    test_num_genes[i] = num_genes
-    #calculate pvalue for that sample
-    test_gene_pvalues[i] = sum(conf_inactive_dev <= test_gene_dev) / num_genes
-    #Grab the tissue of the sample and the sample id
-    test_gene_tissue[i] = as.character(skew_and_stats_df$tissue[skew_and_stats_df$sample_index == final_sample_index[i]])
-    test_gene_sample_index[i] = final_sample_index[i]
-  }
-  #Make label vector for the test gene
-  label_test_gene = rep(test_gene, length(present.list.skew.max))
-  
-  #Save all vectors for this gene
-  all_test_gene_pvalues = c(all_test_gene_pvalues, test_gene_pvalues )
-  all_test_gene_num_genes = c(all_test_gene_num_genes, test_num_genes )
-  all_test_gene_tissues = c(all_test_gene_tissues, test_gene_tissue )
-  all_test_gene_sample_id = c(all_test_gene_sample_id, test_gene_sample_index )
-  all_test_gene_names = c(all_test_gene_names, label_test_gene )
-
-}
-
-#Make dataframe for all test inactive genes
-
-detected_escape_gene_stats = data.frame(gene = all_test_gene_names, tissue = all_test_gene_tissues, sample_id = all_test_gene_sample_id, 
-                                      num_conf_genes = all_test_gene_num_genes, escape_pvalue = all_test_gene_pvalues )
-#Exclude all cell lines
-detected_escape_gene_stats = detected_escape_gene_stats[!grepl('Cells ',detected_escape_gene_stats$tissue), ]
-```
-
-```{r}
-filt_escape_genes = c()
-for(i in 1:length(detected_escape_genes)){
-  
-  gene = detected_escape_genes[i]
-  temp_df = detected_escape_gene_stats[detected_escape_gene_stats$gene == gene, ]
-  if(sum(temp_df$num_conf_genes >= 30) < 30){next} 
-  filt_escape_genes = c(filt_escape_genes, gene)
-  temp_df = temp_df[temp_df$num_conf_genes>=30, ]
-  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
-    ggtitle(gene) + xlab('p-value') +
-    theme(plot.title=element_text(hjust=.5, size=15), 
-      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
-      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
-      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-      panel.border = element_rect(colour = "black", fill=NA, size=1), 
-      panel.background = element_rect(fill = 'white'))
-  suppressWarnings(print(g1))
-  file_name = sprintf('escape_gene_%s_powered_pvalue_dist.pdf', gene)
-  ggsave(plot = g1, path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename = file_name, device = 'pdf', 
-       dpi = 300, width = 4, height = 4, units = 'in', useDingbats = FALSE)
-
-}
-
-```
-
-```{r}
-bin_width = 0.025
-filt_index = detected_escape_gene_stats$gene %in% filt_escape_genes & detected_escape_gene_stats$num_conf_genes >= 30
-filt_detected_escape_gene_stats = detected_escape_gene_stats[filt_index,  ]
-
-ggplot(filt_detected_escape_gene_stats , aes(x = escape_pvalue)) + geom_histogram(aes(y=bin_width*..density..),binwidth=bin_width)
-
-```
-
-
-
-Test the confident inactive genes, just leave it out of the null distribution
-```{r}
-all_test_gene_pvalues = c()
-all_test_gene_num_genes = c()
-all_test_gene_tissues = c()
-all_test_gene_sample_id = c()
-all_test_gene_names = c()
-
-for(j in 1:length(conf_inactive_genes)){
-  
-  #Get the test gene
-  test_gene = conf_inactive_genes[j]
-  #Get the samples that have the gene and are appropriately skewed
-  present_index = unlist(lapply(1:length(list.skew.max), function(i) sum(list.skew.max[[i]]$name == test_gene) > 0))
-  present_index = which(present_index != 0)
-  final_sample_index = present_index[present_index %in% skewed_sample_index]
-  #Subset the data
-  present.list.skew.max = list.skew.max[final_sample_index]
-  #Calculate pvalues using the conf inactive genes as the null distribution
-  test_gene_pvalues = vector(mode = 'numeric', length = length(present.list.skew.max))
-  test_num_genes = vector(mode = 'numeric', length = length(present.list.skew.max))
-  test_gene_tissue = vector(mode = 'numeric', length = length(present.list.skew.max))
-  test_gene_sample_index = vector(mode = 'numeric', length = length(present.list.skew.max))
-  for(i in 1:length(present.list.skew.max)){
-    sample = present.list.skew.max[[i]]
-    #Calculate absolute deviation from .5
-    all_gene_dev = abs(.5 - sample$C.1)
-    #Grab gene of interest dev
-    test_gene_dev = all_gene_dev[sample$name == test_gene]
-    #Grab all the confident inactive gene devs
-    conf_inactive_dev = all_gene_dev[(sample$name %in% conf_inactive_genes) & (sample$name != test_gene)]
-    #Number of genes used in sample for pvalue
-    num_genes = length(conf_inactive_dev)
-    test_num_genes[i] = num_genes
-    #calculate pvalue for that sample
-    test_gene_pvalues[i] = sum(conf_inactive_dev <= test_gene_dev) / num_genes
-    #Grab the tissue of the sample and the sample id
-    test_gene_tissue[i] = as.character(skew_and_stats_df$tissue[skew_and_stats_df$sample_index == final_sample_index[i]])
-    test_gene_sample_index[i] = final_sample_index[i]
-  }
-  #Make label vector for the test gene
-  label_test_gene = rep(test_gene, length(present.list.skew.max))
-  
-  #Save all vectors for this gene
-  all_test_gene_pvalues = c(all_test_gene_pvalues, test_gene_pvalues )
-  all_test_gene_num_genes = c(all_test_gene_num_genes, test_num_genes )
-  all_test_gene_tissues = c(all_test_gene_tissues, test_gene_tissue )
-  all_test_gene_sample_id = c(all_test_gene_sample_id, test_gene_sample_index )
-  all_test_gene_names = c(all_test_gene_names, label_test_gene )
-
-}
-
-#Make dataframe for all test inactive genes
-test_conf_gene_stats = data.frame(gene = all_test_gene_names, tissue = all_test_gene_tissues, sample_id = all_test_gene_sample_id, 
-                                      num_conf_genes = all_test_gene_num_genes, escape_pvalue = all_test_gene_pvalues )
-
-test_conf_gene_stats  = test_conf_gene_stats[!grepl('Cells ',test_conf_gene_stats$tissue), ]
-```
-
-```{r}
-
-filt_conf_inactive = c()
-for(i in 1:length(test_conf_genes)){
-  
-  gene = test_conf_genes[i]
-  temp_df = test_conf_gene_stats[test_conf_gene_stats$gene == gene, ]
-  if(sum(temp_df$num_conf_genes >= 30) < 30){next}
-  filt_conf_inactive = c(filt_conf_inactive, gene)
-  temp_df = temp_df[temp_df$num_conf_genes>=30, ]
-  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
-    ggtitle(gene) + xlab('p-value') +
-    theme(plot.title=element_text(hjust=.5, size=15), 
-      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
-      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
-      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-      panel.border = element_rect(colour = "black", fill=NA, size=1), 
-      panel.background = element_rect(fill = 'white'))
-  suppressWarnings(print(g1))
-  file_name = sprintf('conf_inactive_%s_powered_pvalue_dist.pdf', gene)
-  ggsave(plot = g1, path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename = file_name, device = 'pdf', 
-       dpi = 300, width = 4, height = 4, units = 'in', useDingbats = FALSE)
-  
-}
-```
-
-
-
-```{r}
-filt_index = test_conf_gene_stats$gene %in% filt_conf_inactive & test_conf_gene_stats$num_conf_genes >= 30
-filt_test_conf_gene_stats= test_conf_gene_stats[filt_index,  ]
-
-ggplot(filt_test_conf_gene_stats , aes(x = escape_pvalue)) + geom_histogram(aes(y=bin_width*..density..),binwidth=bin_width)
-
-```
-
-combine the datasets and plot the proportional density histograms
-```{r}
-escape_label = c(rep('known escape', dim(filt_detected_escape_gene_stats)[1]), rep('confident inactive', dim(filt_test_conf_gene_stats)[1]))
-comb_escape_conf_inactive_stats = rbind(filt_detected_escape_gene_stats, filt_test_conf_gene_stats)
-comb_escape_conf_inactive_stats$escape_label = escape_label
-comb_escape_conf_inactive_stats$escape_label[comb_escape_conf_inactive_stats$gene %in% c('KDM5C','EIF2S3')] = 'X imprinted?'
-
-
-
-comb_escape_conf_inactive_stats = rbind(comb_escape_conf_inactive_stats, filt_test_inactive_gene_stats)
-
-comb_escape_conf_inactive_stats$escape_label = factor(comb_escape_conf_inactive_stats$escape_label, levels = c('confident inactive','known escape','X imprinted?',
-                                                                                                               'verified inactive','new escape','putative X imprinted'))
-```
-
-```{r}
-
-
-bin_width = .025
-ggplot(comb_escape_conf_inactive_stats , aes(x = escape_pvalue)) + 
-  geom_histogram(aes(y=bin_width*..density..),binwidth=bin_width, fill = 'grey', color = 'black') + 
-  ylab('aggregated p-value distribution (bin width * density)') + xlab('p-value') +
-  facet_wrap(~escape_label,nrow=2) +
-  theme(axis.text.y=element_text(size=12),axis.title.y=element_text(size=10),
-      axis.text.x=element_text(size=10),axis.title.x=element_text(size=10),
-      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-      panel.border = element_rect(colour = "black", fill=NA, size=1), 
-      panel.background = element_rect(fill = 'white'))
-  
-
-  ggsave(path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename ='combined_classified_pvalue_escape_distrs.pdf' , device = 'pdf', 
-       dpi = 300, width = 8, height = 4, units = 'in', useDingbats = FALSE)
-```
-
-
-
-
 
