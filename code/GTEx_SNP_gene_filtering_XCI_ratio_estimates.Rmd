@@ -2,6 +2,10 @@
 Going through the VCF files from the GATK output
 
 
+To replicate analysis, you first need access to and download the .fastq data from GTEx, which requires dbGAP permissions. Once you have the fastqs, the VCF and WIG files used as input below can be generated following the snakemake pipeline in human_cross_tissue_XCI/code/snakemake_data_processing_pipeline on the Github page for this publication
+https://github.com/JonathanMWerner/human_cross_tissue_XCI
+
+
 
 ```{r}
 library(stringr)
@@ -25,27 +29,25 @@ library(ggridges)
 par1 = 10000:2781479
 par2 = 155701382:156030895
 
-#Sample metadata: /data/GTEx/samples/sample_metadata.txt
 
 # Define files and metadata to read in
 
-
-files= read.table("/home/werner/xchrom_snp_skew/bin/GTEx_ready_with_v8.txt") # example of files, should have SRR ids
+files= read.table("PATH_TO_SRR_IDs") # example of files, should have SRR ids
 
 #Metadata including the v8 data
-mapping = read.table('/home/werner/xchrom_snp_skew/data/GTEx/samples/sample_metadata_with_v8.txt', sep="\t", header = TRUE)
+mapping = read.table('PATH_TO_METADATA', sep="\t", header = TRUE)
 meta = match( files[,1], mapping[,1] )                                            # match files to metadata, find lines in metadata file that match samples in files
 meta.filter = !is.na(meta)                                                        # Checking for samples not in the metadata file
 meta.present = meta[meta.filter] # Exclude those samples
 
 
-wig_files = paste0(files[meta.filter,1],"/GATK_mod_filt/chrX.intersect.wig") # WIG files from runs , input_files = wig_files
-vcf_files = paste0(files[meta.filter,1],"/GATK_mod_filt/chrX.cut")           # VCF files from runs
+wig_files = paste0(files[meta.filter,1],"WIG_FILES") # WIG files from runs , input_files = wig_files
+vcf_files = paste0(files[meta.filter,1],"VCF_FILES")           # VCF files from runs
 
 
 #Add the rest of the file name
-wig_files = paste0("/data/GTEx/output/", wig_files)
-vcf_files = paste0("/data/GTEx/output/", vcf_files)
+wig_files = paste0("DATA_PATH", wig_files)
+vcf_files = paste0("DATA_PATH", vcf_files)
 
 
 # Initialize variables to save data
@@ -58,8 +60,8 @@ list.vcf = list()
 #NOT dbSNP filtered. Will need to match the list.vcf files and the list.vcf.stats files by POS (genome position) for downstream filtering
 #Also these variant tables will not include any indels, which will still be in the unfiltered vcf files, just a heads up
 
-header = '/data/GTEx/output/'
-tail = '/GATK_mod_filt/chrX.snps_filtered.tab'
+header = 'DATA_PATH'
+tail = 'PATH_TO_GATK_FILTERED_VCF'
 
 #The tab delimited files for the annotated raw SNPs coming from the GATK pipeline
 vcf_stat_tables = paste0(files[meta.filter,1], tail)
@@ -358,6 +360,8 @@ save(sample_meta, file = '../data/sample_metadata_with_v8.Rdata')
 load('../data/sample_metadata_with_v8.Rdata')
 
 ```
+
+
 
 
 
@@ -1506,13 +1510,6 @@ load('../data/gene_skew_to_tissue_skew_correlations_v8.Rdata')
 
 
 
-```{r}
-
-#load('/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GATK_mod/gene_skew_correlations/gene_skew_to_tissue_skew_correlations_v8.Rdata')
-
-```
-
-
 
 Using the karyoploteR package
 ```{r}
@@ -1607,7 +1604,7 @@ load('../data/bootstrap_XCI_skews_all_v8_GTEx.Rdata')
 
 
 ```{r}
-#head(boots)
+
 length(boots)
 
 ```
@@ -1882,10 +1879,18 @@ save(skew_and_stats_df, file = "../data/v8_GTEx_skew_and_stats_df.Rdata")
 ```
 
 
+```{r}
+load("../data/v8_GTEx_skew_and_stats_df.Rdata")
 
 
+```
 
 
+```{r}
+
+skew_and_stats_df
+
+```
 
 
 

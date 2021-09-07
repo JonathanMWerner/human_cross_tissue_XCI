@@ -1030,6 +1030,13 @@ load('../data/escape_pval_v8_df.Rdata')
 
 ```
 
+```{r}
+comb_escape_conf_inactive_stats
+
+```
+
+
+
 Save as a text file the escape classifications
 ignore the imprinted classification
 

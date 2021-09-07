@@ -1,0 +1,2231 @@
+
+```{r}
+library("ggExtra")
+library("ggplot2")
+library(dplyr)
+library(boot)
+library(VGAM) 
+library(RColorBrewer)
+library(gplots)
+library("reshape2")
+library(ComplexHeatmap)
+library(circlize)
+library(ggridges)
+library(parallel)
+
+```
+
+
+
+Load the skew_and_stats dataframe
+
+```{r}
+#Skews with esscape filtered out
+load("../data/v8_GTEx_skew_and_stats_df.Rdata")
+```
+
+```{r}
+head(skew_and_stats_df)
+dim(skew_and_stats_df)
+
+```
+
+Get some summary info before filtering on the number of SNPs and such.
+Number of donors, average number of tissues per donor, total tissue sample size with estimated XCI skews
+
+```{r}
+#Ignore the cell cultures
+temp_stats_df = skew_and_stats_df[!skew_and_stats_df$tissue %in% c('Cells - EBV-transformed lymphocytes','Cells - Cultured fibroblasts','Cells - Transformed fibroblasts'), ]
+
+#Total number of donors
+length(unique(temp_stats_df$donor))
+
+#Number of estimates per tissue
+table(temp_stats_df$tissue)
+
+#total number of estimates
+length(temp_stats_df$skew)
+
+#Number of tissue samples per donor, but includes tissue replicates
+mean(table(temp_stats_df$donor))
+
+```
+
+```{r}
+
+#Average number of tissues with duplicated removed, still about 14
+remove_dups <- function(x) {
+  x = unique(x)
+  return(length(x))
+}
+
+
+temp_stats_df = temp_stats_df %>%
+ group_by(donor) %>%
+ mutate(num_tiss_without_dups = remove_dups(tissue))
+
+
+index = which(!duplicated(temp_stats_df$donor))
+mean(temp_stats_df$num_tiss_without_dups[index])
+
+```
+
+Look at number of SNPs per estimate, CI around XCI ratio estimates, decide meaningful filters
+#################################
+Supplemental figure 3 panels a-c
+#################################
+
+
+```{r}
+skew_stat_plot = ggplot(skew_and_stats_df, aes(skew, num_snps)) + geom_point(alpha=1/5,size=2) + geom_density2d() +
+  ylab('Number of SNPs used in skew estimate') + xlab('Skew estimate') + 
+  xlim(.5,1) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12))
+
+skew_stat_plot
+
+skew_stat_plot = ggplot(skew_and_stats_df, aes(skew, CI_width)) + geom_point(alpha=1/5,size=2) + geom_density2d() +
+  ylab('CI around skew estimate') + xlab('Skew estimate') + 
+  xlim(.5,1) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12))
+
+skew_stat_plot
+
+skew_stat_plot = ggplot(skew_and_stats_df, aes(num_snps, CI_width)) + geom_point(alpha=1/5,size=2) + geom_density2d() +
+  ylab('CI around skew estimate') + xlab('Number of SNPs') + geom_vline(xintercept = 10, color = 'red', size = 1.5) + geom_hline(yintercept = .15, color = 'red', size = 1.5) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12))
+
+skew_stat_plot
+
+```
+
+Set up a filter for samples with < 10 SNPs and CI >= .15
+
+```{r}
+
+num_snp_index = skew_and_stats_df$num_snps >= 10 & skew_and_stats_df$CI_width < .15
+skew_and_stats_df = skew_and_stats_df[num_snp_index, ]
+dim(skew_and_stats_df)
+
+ ggplot(skew_and_stats_df, aes(skew, num_snps)) + geom_point(alpha=1/5,size=1) + ylab('Number of SNPs used in skew estimate') + xlab('Skew estimate')
+
+
+ggplot(skew_and_stats_df, aes(skew, CI_width)) + geom_point(alpha=1/5,size=1) + ylab('CI around skew estimate') + xlab('Skew estimate') 
+
+
+ggplot(skew_and_stats_df, aes(num_snps, CI_width)) + geom_point(alpha=1/5,size=1) + ylab('CI around skew estimate') + xlab('Number of SNPs') 
+
+
+```
+
+
+Get summary stats on the number of well powered SNPs per sample, exclude the cell lines
+
+```{r}
+
+num_good_snps = as.integer(skew_and_stats_df$num_snps[!skew_and_stats_df$tissue %in% c('Cells - EBV-transformed lymphocytes','Cells - Cultured fibroblasts','Cells - Transformed fibroblasts')])
+mean(num_good_snps)
+sd(num_good_snps)
+
+length(num_good_snps)
+
+```
+
+
+
+Number of donors, 
+
+```{r}
+table(table(skew_and_stats_df$donor[!skew_and_stats_df$tissue %in% c('Cells - EBV-transformed lymphocytes','Cells - Cultured fibroblasts','Cells - Transformed fibroblasts')]) > 0)
+
+```
+
+
+Add the germlayer and the grouped tissue
+
+```{r}
+
+#Grouping tissues into larger groups
+sample_tissue_meta = as.character(skew_and_stats_df$tissue)
+sample_tissue_meta[sample_tissue_meta == 'Adipose - Subcutaneous' | sample_tissue_meta == 'Adipose - Visceral (Omentum)'] = 'Adipose'
+sample_tissue_meta[sample_tissue_meta == 'Artery - Aorta' | sample_tissue_meta == 'Artery - Coronary' | sample_tissue_meta == 'Artery - Tibial' ] = 'Artery'
+sample_tissue_meta[sample_tissue_meta == 'Cervix - Ectocervix' | sample_tissue_meta == 'Cervix - Endocervix'] = 'Cervix'
+sample_tissue_meta[sample_tissue_meta == 'Colon - Sigmoid' | sample_tissue_meta == 'Colon - Transverse'] = 'Colon'
+sample_tissue_meta[sample_tissue_meta == 'Esophagus - Gastroesophageal Junction' | sample_tissue_meta == 'Esophagus - Mucosa' | sample_tissue_meta == 'Esophagus - Muscularis' ] = 'Esophagus'
+sample_tissue_meta[sample_tissue_meta == 'Heart - Atrial Appendage' | sample_tissue_meta == 'Heart - Left Ventricle'] = 'Heart'
+sample_tissue_meta[sample_tissue_meta == 'Skin - Not Sun Exposed (Suprapubic)' | sample_tissue_meta == 'Skin - Sun Exposed (Lower leg)'] = 'Skin'
+sample_tissue_meta[sample_tissue_meta == 'Brain - Amygdala' | sample_tissue_meta == 'Brain - Anterior cingulate cortex (BA24)' | sample_tissue_meta == 'Brain - Caudate (basal ganglia)' | sample_tissue_meta == 'Brain - Cerebellar Hemisphere' | sample_tissue_meta == 'Brain - Cerebellum' | sample_tissue_meta == 'Brain - Cortex' | sample_tissue_meta == 'Brain - Frontal Cortex (BA9)' | sample_tissue_meta == 'Brain - Hippocampus' | sample_tissue_meta == 'Brain - Hypothalamus' | sample_tissue_meta == 'Brain - Nucleus accumbens (basal ganglia)' | sample_tissue_meta == 'Brain - Putamen (basal ganglia)' | sample_tissue_meta == 'Brain - Spinal cord (cervical c-1)' | sample_tissue_meta == 'Brain - Substantia nigra'] = 'Brain'
+
+table(sample_tissue_meta)
+
+
+skew_and_stats_df$grouped.tissue = sample_tissue_meta
+
+```
+
+```{r}
+#Grouping by germ layer
+temp = as.character(skew_and_stats_df$grouped.tissue)
+
+temp[temp == 'Adipose' | temp == 'Heart' | temp == 'Whole Blood' | temp == 'Cells - EBV-transformed lymphocytes' | temp == 'Cells - Transformed fibroblasts' | temp == 'Cells - Cultured fibroblasts'| temp == 'Muscle - Skeletal' | temp == 'Adrenal Gland' | temp == 'Artery' | temp == 'Fallopian Tube' | temp == 'Kidney - Cortex' | temp == 'Kidney - Medulla' | temp == 'Spleen' | temp == 'Uterus' | temp == 'Cervix' ] = 'Mesoderm'
+
+
+temp[temp == 'Brain' | temp == 'Skin' | temp == 'Breast - Mammary Tissue' | temp == 'Nerve - Tibial' | temp == 'Minor Salivary Gland' | temp == 'Pituitary' ] = 'Ectoderm'
+
+
+temp[temp == 'Lung' | temp == 'Thyroid' | temp == 'Pancreas' | temp == 'Liver' | temp == 'Colon' | temp == 'Small Intestine - Terminal Ileum' | temp == 'Vagina' | temp == 'Ovary' | temp == 'Stomach' | temp == 'Esophagus' | temp == 'Bladder' ] = 'Endoderm'
+
+skew_and_stats_df$germ_layer = temp
+head(skew_and_stats_df)
+
+```
+
+Make a small dataframe with just the tissue names and germlayer info
+
+```{r}
+
+tissues = names(table(skew_and_stats_df$tissue))
+germ_layer = c()
+
+for( i in 1:length(tissues)){
+  germ_layer = c(germ_layer, as.character(skew_and_stats_df$germ_layer[skew_and_stats_df$tissue == tissues[i]][1]))
+}
+
+germ_layer_df = data.frame(tissues = tissues, germ_layers = germ_layer)
+germ_layer_df
+
+```
+
+
+Set up some matrices we'll be reusing and the germ layer annotations/colors.
+
+```{r}
+donors = names(table(skew_and_stats_df$donor))
+length(donors)
+#Start with all the tissues, exclude the male tissues
+tissues =  names(table(skew_and_stats_df$tissue))
+tissues = tissues[! tissues %in% c('Prostate', 'Testis','body_site_s')]
+length(tissues)
+
+grouped_tissues = names(table(skew_and_stats_df$grouped.tissue))
+grouped_tissues = grouped_tissues[! grouped_tissues %in% c('Prostate', 'Testis','body_site_s')]
+length(grouped_tissues)
+```
+
+
+```{r}
+
+names(table(skew_and_stats_df$germ_layer))
+
+```
+
+
+
+
+```{r}
+#Get germ layers for the filt_tissues
+
+germ_layers = vector(mode='character', length=length(tissues))
+
+for( i in 1:length(tissues)){
+  index = which(skew_and_stats_df$tissue == tissues[i])
+  germ_layers[i]= as.character(skew_and_stats_df$germ_layer[index[1]])
+  
+}
+
+germ_layers
+
+```
+
+
+Save the germ_layer color specifications
+```{r}
+germ_layer_colors = brewer.pal(n = 4, name = "Spectral")
+ecto_color = germ_layer_colors[1]
+endo_color = germ_layer_colors[2]
+meso_color = germ_layer_colors[4]
+
+```
+
+
+
+Start off looking at a table of pairwise donations, number of donors contributing tissues X,Y
+Just getting a sense of how much pairwise donations there are to work with
+And make a matrix with the donors names that do donate both of those tissues
+
+
+```{r}
+tiss_tiss_donors_df = as.data.frame(matrix(nrow = length(tissues), ncol = length(tissues)))
+rownames(tiss_tiss_donors_df) = tissues
+colnames(tiss_tiss_donors_df) = tissues
+
+tiss_tiss_donors_names_matrix = matrix(rep(list(), length(tissues)*length(tissues)), nrow=length(tissues), ncol=length(tissues))
+rownames(tiss_tiss_donors_names_matrix) = tissues
+colnames(tiss_tiss_donors_names_matrix) = tissues
+
+for(i in 1:length(tissues)){
+  
+  current_tiss = tissues[i]
+  
+  for(j in 1: length(tissues)){
+     
+    next_tiss = tissues[j]
+    
+    donors_for_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == current_tiss])
+    #Just going to ignore the donors that have multiple donations for the same tiss
+    duplicates = donors_for_tiss[duplicated(donors_for_tiss)] 
+    donors_for_tiss = donors_for_tiss[!donors_for_tiss %in% duplicates]  
+    
+    donors_for_next_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == next_tiss])
+    duplicates = donors_for_next_tiss[duplicated(donors_for_next_tiss)] 
+    donors_for_next_tiss = donors_for_next_tiss[!donors_for_next_tiss %in% duplicates]
+    
+    tiss_tiss_donors_df[i,j] = sum(unique(donors_for_tiss) %in% unique(donors_for_next_tiss))
+    tiss_tiss_donors_names_matrix[i,j] = list(unique(donors_for_tiss[donors_for_tiss %in% donors_for_next_tiss]))
+  }
+}
+
+tiss_tiss_donors_df
+tiss_tiss_donors_names_matrix
+
+```
+
+
+Get a binary matrix too for which donors donate which tissues
+
+```{r}
+diagonal = diag(tiss_tiss_donors_names_matrix)
+
+
+binary_tissue_donor_matrix = matrix(nrow = length(names(diagonal)), ncol = length(donors))
+rownames(binary_tissue_donor_matrix) = names(diagonal)
+colnames(binary_tissue_donor_matrix) = donors
+
+for(i in 1:length(names(diagonal))){
+  
+  donors_for_tiss = diagonal[[i]]
+  index = colnames(binary_tissue_donor_matrix) %in% donors_for_tiss
+  binary_tissue_donor_matrix[i, index] = 1
+  binary_tissue_donor_matrix[i, !index] = 0
+}
+
+
+binary_tissue_donor_matrix = binary_tissue_donor_matrix[!rownames(binary_tissue_donor_matrix) %in% c('Testis','Prostate','body_site_s'), ]
+
+
+```
+
+
+
+Heatmap showing the donor tissue intersections
+Add a germ layer annotation
+Add marginal boxplot annotations to get the number of donors per tissue and number of tissues per donor
+
+
+
+
+```{r}
+row_index = !rownames(binary_tissue_donor_matrix) %in% c('Cells - EBV-transformed lymphocytes','Cells - Cultured fibroblasts','Cells - Transformed fibroblasts')
+binary_tissue_donor_matrix = binary_tissue_donor_matrix[row_index, ]
+
+```
+
+```{r}
+germ_layers = germ_layers[row_index]
+
+```
+
+
+############################
+Suplemental Figure 1
+###########################
+
+
+```{r}
+
+#Get the number of tissues per donor
+num_tiss_per_donor = colSums(binary_tissue_donor_matrix)
+max_tiss_per_donor = max(num_tiss_per_donor)
+#Get the number of donors per tissue
+num_donors_per_tissue = rowSums(binary_tissue_donor_matrix)
+max_donor_per_tiss = max(num_donors_per_tissue)
+
+#Germ layer annotation and number of donors per tissue
+row_annot = HeatmapAnnotation(germ_layer = germ_layers, donors_per_tiss = anno_barplot(num_donors_per_tissue, gp = gpar(fill = rep(1,nrow(binary_tissue_donor_matrix)))),
+                                     which = 'row',
+                                     col = list(germ_layer=c('Ectoderm'=ecto_color, 'Mesoderm'=meso_color, 'Endoderm' = endo_color)), 
+                                     gp = gpar(col = "black"), show_annotation_name = c(FALSE,TRUE),
+                                     annotation_legend_param = list(title = 'Germ layer'))
+names(row_annot) = c('Germ layers','Donors per tissue')
+
+#number of tissues per donor column point annotation
+tissues_per_donor_annot = HeatmapAnnotation(tissues_per_donor = anno_barplot(num_tiss_per_donor),which = 'column')
+names(tissues_per_donor_annot) = c('Tissues per donor')
+
+
+Heatmap(binary_tissue_donor_matrix, col=colors, column_title = 'Donor tissue contributions', use_raster = TRUE,
+        clustering_method_rows = "ward.D2",clustering_method_columns = "ward.D2", 
+        show_row_dend=FALSE, show_column_dend = FALSE, 
+        row_names_gp = gpar(fontsize = 8), show_column_names = FALSE,
+        right_annotation = row_annot,
+        top_annotation = tissues_per_donor_annot,
+        heatmap_legend_param = list( title = "Donated", at = c(0, 1), labels = c("FALSE", 'TRUE')))
+```
+Final number of donors that donated tissues kept after filtering and ignoring cell lines
+
+```{r}
+
+table(colSums(binary_tissue_donor_matrix) > 0)
+
+
+
+```
+
+
+
+Get boxplots per donor of tissue skews, ordered by mean donor skew
+
+```{r}
+culture_index = !skew_and_stats_df$tissue %in% c('Cells - EBV-transformed lymphocytes','Cells - Cultured fibroblasts','Cells - Transformed fibroblasts')
+
+subset_skew_and_stats = skew_and_stats_df[ culture_index , c('skew','donor')]
+donor_mean_skews = aggregate(subset_skew_and_stats[ ,1], list(subset_skew_and_stats$donor), median)
+donor_mean_skews = donor_mean_skews[order(donor_mean_skews$x), ]
+ordered_donor_names = as.character(donor_mean_skews$Group.1)
+
+subset_skew_and_stats$donor = factor(subset_skew_and_stats$donor, levels = ordered_donor_names)
+subset_skew_and_stats
+```
+
+##############################
+Supplemental Figure 5
+##############################
+
+
+
+```{r}
+first_100 = levels(subset_skew_and_stats$donor)[1:100]
+first_index = subset_skew_and_stats$donor %in% first_100
+
+ggplot(subset_skew_and_stats[first_index ,], aes(x = donor, y = skew)) + geom_boxplot(outlier.size = .5) +
+  ylim(.5,1) + ylab('Tissue skews') + xlab('Donors') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_blank(),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12), 
+        axis.ticks.x = element_blank())
+
+second_100 = levels(subset_skew_and_stats$donor)[101:200]
+second_index = subset_skew_and_stats$donor %in% second_100
+
+ggplot(subset_skew_and_stats[second_index ,], aes(x = donor, y = skew)) + geom_boxplot(outlier.size = .5) +
+  ylim(.5,1) + ylab('Tissue skews') + xlab('Donors') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_blank(),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12), 
+        axis.ticks.x = element_blank())
+
+third_100 = levels(subset_skew_and_stats$donor)[201:length(subset_skew_and_stats$donor)]
+third_index = subset_skew_and_stats$donor %in% third_100
+
+ggplot(subset_skew_and_stats[third_index ,], aes(x = donor, y = skew)) + geom_boxplot(outlier.size = .5) +
+  ylim(.5,1) + ylab('Tissue skews') + xlab('Donors') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_blank(),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12), 
+        axis.ticks.x = element_blank())
+
+```
+
+
+```{r}
+mean(colSums(binary_tissue_donor_matrix))
+
+rowSums(binary_tissue_donor_matrix)
+
+
+sum(colSums(binary_tissue_donor_matrix))
+```
+
+
+
+Looking at duplicated tissues samples from same donor, how different are XCI ratio estimates
+
+```{r}
+dup_tissues = c()
+diff_skew_dup_tiss = c()
+tissue_label = c()
+for(i in 1:length(donors)){
+  
+  #Get the skews for that donor
+  donor_data = skew_and_stats_df[skew_and_stats_df$donor == donors[i], ]
+  #See of there are any duplicate tissue samples
+  dup = duplicated(as.character(donor_data$tissue))
+  donor_dup = as.character(donor_data$tissue[dup])
+  dup_tissues = c(dup_tissues, donor_dup)
+  
+  #Get the absolute differences in skew between the duplicated tissues
+  if(length(donor_dup) == 0){next}
+  for(j in 1:length(donor_dup)){
+    dup_skews = donor_data$skew[donor_data$tissue == donor_dup[j]]
+    #Get the pairwise differences between those skews, dist() will calculate the euclidean distance
+    differences = c(dist(dup_skews))
+    tiss_label = rep(donor_dup[j], length(differences))
+    diff_skew_dup_tiss = c(diff_skew_dup_tiss, differences)
+    tissue_label = c(tissue_label,tiss_label ) 
+  }
+
+}
+
+```
+
+```{r}
+
+par(mar = c(18,4,4,1))
+barplot(table(tissue_label), names.arg = names(table(tissue_label)), srt = 90, ylab = 'Number of tissue replicates', 
+        horiz = F, las = 2, cex.names = 1)
+
+```
+
+
+
+Most tissue replicates have very similar skews, just average together the skew estimates for those with replicate samples
+
+```{r}
+
+hist(diff_skew_dup_tiss, breaks = 32, main = 'Replicate tissue samples have comparable skews', xlab = 'Skew difference between replicates')
+
+```
+
+```{r}
+mean(diff_skew_dup_tiss)
+
+sd(diff_skew_dup_tiss)
+```
+
+box plots of replicate deviation ordered by tissue
+```{r}
+rep_skew_dev_df = data.frame(tissue = tissue_label, skew_dev = diff_skew_dup_tiss)
+
+#Order by median deviance
+median_rep_devs = aggregate(rep_skew_dev_df[ ,'skew_dev'], list(rep_skew_dev_df$tissue), mean)
+median_rep_devs = median_rep_devs[order(median_rep_devs$x), ]
+ordered_tissues = as.character(median_rep_devs$Group.1)
+
+rep_skew_dev_df$tissue = factor(rep_skew_dev_df$tissue, levels = ordered_tissues)
+```
+
+
+```{r}
+ggplot(rep_skew_dev_df, aes(x = tissue, y = skew_dev)) + geom_boxplot() +
+  ylab('Deviation in skew between tissue replicates') +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_text(angle = 90, hjust = .95, vjust = .2),
+        axis.title.y = element_text(size=12), axis.title.x = element_blank(), 
+        axis.ticks.x = element_blank())
+
+```
+
+
+Build a donor X tissue matrix with skews, averaging the replicates
+
+```{r}
+donor_tiss_skew_matrix = matrix(nrow = length(donors), ncol = length(tissues))
+rownames(donor_tiss_skew_matrix) = donors                                
+colnames(donor_tiss_skew_matrix) = tissues
+
+
+for(i in 1:length(donors)){
+  
+  row_index = rownames(donor_tiss_skew_matrix) == donors[i]
+  
+  skews = skew_and_stats_df$skew[skew_and_stats_df$donor == donors[i]]
+  donor_tiss = as.character(skew_and_stats_df$tissue[skew_and_stats_df$donor == donors[i]])
+  dup_tissues = unique(donor_tiss[duplicated(donor_tiss)])
+  if(length(dup_tissues) == 0){
+    #Reorder to match the order of the matrix
+    col_index = colnames(donor_tiss_skew_matrix) %in% donor_tiss
+    present = colnames(donor_tiss_skew_matrix)[col_index]
+    index = match(present, donor_tiss)
+    donor_tiss_skew_matrix[row_index, col_index] = skews[index]
+  }else{
+
+    #Replace all skew values with the mean skew
+    for(j in 1:length(dup_tissues)){
+      mean_skew = mean(skews[donor_tiss == dup_tissues[j]])
+      skews[donor_tiss == dup_tissues[j]] = mean_skew
+    }
+    
+    #Get rid of the duplicates
+    donor_tiss = donor_tiss[!duplicated(donor_tiss)]
+    skews = skews[!duplicated(donor_tiss)]
+    
+    #Reorder to match the order of the matrix
+    col_index = colnames(donor_tiss_skew_matrix) %in% donor_tiss
+    present = colnames(donor_tiss_skew_matrix)[col_index]
+    index = match(present, donor_tiss)
+    donor_tiss_skew_matrix[row_index, col_index] = skews[index]
+  }
+  
+}
+
+donor_tiss_skew_matrix = donor_tiss_skew_matrix[ ,!colnames(donor_tiss_skew_matrix) %in% 
+                                                   c('Prostate','Testis', 'Kidney - Medulla', "Cells - EBV-transformed lymphocytes", "Cells - Cultured fibroblasts", "Cells - Transformed fibroblasts")]
+
+```
+
+
+
+Reorder donors by their mean skew
+```{r}
+mean_skews = rowMeans(donor_tiss_skew_matrix, na.rm = TRUE)
+mean_skews = mean_skews[order(mean_skews, decreasing = FALSE)]
+index = match(names(mean_skews), rownames(donor_tiss_skew_matrix))
+donor_tiss_skew_matrix = donor_tiss_skew_matrix[index, ]
+table(rownames(donor_tiss_skew_matrix) == names(mean_skews))
+```
+
+Reorder tissues by germ layer
+```{r}
+mat_cols = colnames(donor_tiss_skew_matrix)
+#Get germ layers for the filt_tissues
+
+germ_layers = vector(mode='character', length=length(mat_cols))
+
+for( i in 1:length(mat_cols)){
+  index = which(skew_and_stats_df$tissue == mat_cols[i])
+  germ_layers[i]= as.character(skew_and_stats_df$germ_layer[index[1]])
+  
+}
+
+reorder_index = order(germ_layers)
+germ_layers = germ_layers[reorder_index]
+donor_tiss_skew_matrix = donor_tiss_skew_matrix[ ,reorder_index ]
+
+```
+
+Exclude donors with only 1 tissue
+```{r}
+keep_index = rowSums(!is.na(donor_tiss_skew_matrix)) > 1
+donor_tiss_skew_matrix = donor_tiss_skew_matrix[keep_index, ]
+mean_skews = mean_skews[keep_index]
+```
+
+
+
+Exclude low sampled tissues just for visualization
+```{r}
+keep_index = colSums(!is.na(donor_tiss_skew_matrix)) > 10
+donor_tiss_skew_matrix = donor_tiss_skew_matrix[, keep_index]
+germ_layers = germ_layers[keep_index]
+```
+
+
+Turn Nas to 0 for clustering
+```{r}
+donor_tiss_skew_matrix[is.na(donor_tiss_skew_matrix)] = .499
+```
+
+
+First look at all tissues
+
+```{r}
+library(viridis)
+
+```
+##########################
+Figure 3 panel a
+##########################
+
+
+
+```{r}
+#Germ layer annotation and number of donors per tissue
+col_annot = HeatmapAnnotation(germ_layer = germ_layers,
+                                     which = 'column',
+                                     col = list(germ_layer=c('Ectoderm'=ecto_color, 'Mesoderm'=meso_color, 'Endoderm' = endo_color)), 
+                                     gp = gpar(col = "black"), show_annotation_name = TRUE,
+                                     annotation_legend_param = list(title = 'Germ layer'))
+
+max_skew = max(skew_and_stats_df$skew)
+skew_scale = 500:(max_skew*1000)/1000
+
+col_fun = colorRamp2(c(.499, skew_scale), 
+                    c('black',viridis(length(skew_scale), option = 'plasma')))
+
+ha_2 = rowAnnotation(mean_donor_skew = mean_skews,
+                   col = list(mean_donor_skew = col_fun), 
+                   show_legend = FALSE)
+
+Heatmap(donor_tiss_skew_matrix, show_row_names = FALSE, show_column_names = TRUE, name = 'All tissues', show_column_dend = FALSE,
+        col = col_fun, use_raster = TRUE, row_title = 'Donors', 
+        cluster_rows = FALSE,cluster_columns = FALSE, 
+        right_annotation = ha_2,
+        top_annotation = col_annot,
+        column_names_gp = grid::gpar(fontsize = 8),
+        heatmap_legend_param = list(title = 'Skew'))
+
+```
+
+
+
+
+
+################################################
+Estimating cell counts from variance in XCI ratios across tissues
+################################################
+
+
+Find the distribution with minimal error (difference) in the tails (<= .40 and >= .60) of the CDF and the empirical CDF of the tissue XCI ratio distribution.
+Theoretically a binomial distribution, but fit a normal for a continuous approximation. For a set of binomial distributions defined by N = 1:50, use the theoretical variance as the variance for the normal fits. Select the one with minimal error.
+
+Shoudl be done in the unfolded space
+
+```{r}
+
+# Functions to fold and unfold ratios 
+folded <- function(x) { apply( cbind(x,1-x), 1, max)} 
+unfold <- function(x) { c(x,1-x) } 
+```
+
+
+
+```{r}
+
+#Tissues with at leasst X donors
+filt_tissues = names(table(skew_and_stats_df$tissue)[table(skew_and_stats_df$tissue) >= 10])
+
+
+for(tissue in filt_tissues){
+  
+  skews = unfold(skew_and_stats_df$skew[skew_and_stats_df$tissue == tissue])
+  hist(skews, main = sprintf('XCI skews: %s', tissue), xlim = c(0,1), breaks = 16)
+}
+
+
+```
+
+
+Test case
+```{r}
+tissue = 'Adipose - Subcutaneous'
+
+n = 16
+p = .5
+norm_sd = sqrt( (p*(1-p)) / n )
+
+percentiles = seq(.01,.99,.01)
+
+#Get the empirical skews for that tissue
+empir_skews = unfold(skew_and_stats_df$skew[skew_and_stats_df$tissue == tissue])
+num_skews = length(empir_skews)
+#Get the quantiles for these skews
+empir_quants = quantile(empir_skews, probs = percentiles, type=1)
+#Get the theoretical percentiles from the normal distribution
+norm_percentiles = qnorm(percentiles, mean=p, sd = norm_sd)
+bin_percentiles = qbinom(percentiles, size=n, prob=p) / n
+
+plot(empir_quants, percentiles, xlim = c(0,max(percentiles)), main = 'Normal percentiles')
+points(norm_percentiles, percentiles, type = 'o', col='red')
+
+
+plot(empir_quants, percentiles, xlim = c(0,max(percentiles)), main = 'Binomial percentiles')
+points(bin_percentiles, percentiles, type = 'o', col='red')
+
+
+quant_filt = empir_quants <= .4 | empir_quants >= .6 
+#Calculating a general coefficient of determination
+
+error = empir_quants[quant_filt] - norm_percentiles[quant_filt] 
+total_sum_squares = sum( (empir_quants[quant_filt]  - mean(empir_quants[quant_filt] ))^2 )
+sum_squares_error = sum(error^2)
+coef_determ = 1 - (sum_squares_error / total_sum_squares)
+coef_determ
+
+
+error = empir_quants[quant_filt] - bin_percentiles[quant_filt] 
+total_sum_squares = sum( (empir_quants[quant_filt]  - mean(empir_quants[quant_filt] ))^2 )
+sum_squares_error = sum(error^2)
+coef_determ = 1 - (sum_squares_error / total_sum_squares)
+coef_determ
+
+```
+Looking at both binomial and normal theoretical CDFs over the empirical tissue XCI ratio CDFs.
+Normal is the obvious better choice as our XCI ratio estimates are continous
+
+```{r}
+
+for(tissue in c('Adipose - Subcutaneous', 'Whole Blood')){
+
+  p = .5
+  n = 2:50
+  percentiles = seq(.01, .99, 0.01)
+
+  bin_error_vector = vector(mode = 'numeric', length = length(n))
+  norm_error_vector = vector(mode = 'numeric', length = length(n))
+  
+  #Get the empirical skews for that tissue
+  empir_skews = unfold(skew_and_stats_df$skew[skew_and_stats_df$tissue == tissue])
+  num_skews = length(empir_skews)
+  #Get the quantiles for these skews
+  empir_quants = quantile(empir_skews, probs = percentiles, type=1)
+  #Only going to be fitting over the confident skews
+  quant_filt = empir_quants <= .4 | empir_quants >= .6
+  
+  
+  
+  for(i in 1:length(n)){
+    
+    #Get the normal and binomial percentiles for the n parameter
+    norm_sd = sqrt( (p*(1-p)) / n[i] )
+    norm_percentiles = qnorm(percentiles, mean=p, sd = norm_sd)
+    bin_percentiles = qbinom(percentiles, size=n[i], prob=p) / n[i]
+    
+    if(n[i] %in% c(4,8,16,32)){
+
+      plot(empir_quants, percentiles, xlim = c(0,1), xlab='XCI skews', ylab = 'Percentiles', 
+           main=sprintf('Empirical vs theoretical percentiles, Binomial N = %g', n[i]))
+      points(bin_percentiles, percentiles, type = 'o', col='red')
+      legend(x = 'bottomright', legend=c('Empirical','Theoretical'), col = c('black','red'), pch=15)
+      
+      plot(empir_quants, percentiles, xlim = c(0,1), xlab='XCI skews', ylab = 'Percentiles', 
+           main=sprintf('Empirical vs theoretical percentiles, Normal N = %g', n[i]))
+      points(norm_percentiles, percentiles, type = 'o', col='red')
+      legend(x = 'bottomright', legend=c('Empirical','Theoretical'), col = c('black','red'), pch=15)       
+        
+      }    
+    
+    bin_error_vector[i] = sum((empir_quants[quant_filt] - bin_percentiles[quant_filt])^2)
+    norm_error_vector[i] = sum((empir_quants[quant_filt] - norm_percentiles[quant_filt])^2)
+    
+
+  }
+
+  plot(n, bin_error_vector, ylab = 'Sum sq_error empirical - binomial percentiles', xlab = 'N', 
+       main = sprintf('%s Num donors= %g', tissue, num_skews/2), xlim = c(0,n[length(n)]))
+  
+  plot(n, norm_error_vector, ylab = 'Sum sq_error empirical - normal percentiles', xlab = 'N', 
+     main = sprintf('%s Num donors= %g', tissue, num_skews/2), xlim = c(0,n[length(n)]))
+
+}
+
+```
+
+Visualize the error lanscapes for the model fits for each tissue
+
+
+```{r}
+
+binomial_fitted_est_n = vector(mode='numeric', length = length(filt_tissues))          
+binomial_fitted_error = vector(mode='numeric', length = length(filt_tissues))
+
+normal_fitted_est_n = vector(mode='numeric', length = length(filt_tissues))
+normal_fitted_error = vector(mode='numeric', length = length(filt_tissues))
+num_samples_per_tiss= vector(mode='numeric', length = length(filt_tissues))
+
+for(k in 1:length(filt_tissues)){
+
+  p = .5
+  n = 2:50
+  percentiles = seq(.01, .99, 0.01)
+
+  bin_error_vector = vector(mode = 'numeric', length = length(n))
+  norm_error_vector = vector(mode = 'numeric', length = length(n))
+  
+  #Get the empirical skews for that tissue
+  empir_skews = unfold(skew_and_stats_df$skew[skew_and_stats_df$tissue == filt_tissues[k]])
+  num_skews = length(empir_skews)
+  num_samples_per_tiss[k] = num_skews / 2 #Number of unfolded skews is twice that of the sample size for that tissue
+  #Get the quantiles for these skews
+  empir_quants = quantile(empir_skews, probs = percentiles, type=1)
+  #Only going to be fitting over the confident skews
+  quant_filt = empir_quants <= .4 | empir_quants >= .6
+    
+  for(i in 1:length(n)){
+    #Get the normal and binomial percentiles for the n parameter
+    norm_sd = sqrt( (p*(1-p)) / n[i] )
+    norm_percentiles = qnorm(percentiles, mean=p, sd = norm_sd)
+    bin_percentiles = qbinom(percentiles, size=n[i], prob=p) / n[i]
+    #And the error between the empirical and theoretical percentiles
+    bin_error_vector[i] = sum((empir_quants[quant_filt] - bin_percentiles[quant_filt])^2)
+    norm_error_vector[i] = sum((empir_quants[quant_filt] - norm_percentiles[quant_filt])^2)
+  }
+
+  #Visualize the error over the different n parameters
+  plot(n, bin_error_vector, ylab = 'Sum sq_error empirical - binomial percentiles', xlab = 'N', 
+       main = sprintf('%s Num donors= %g', filt_tissues[k], num_skews/2), xlim = c(0,n[length(n)]))
+  plot(n, norm_error_vector, ylab = 'Sum sq_error empirical - normal percentiles', xlab = 'N', 
+     main = sprintf('%s Num donors= %g', filt_tissues[k], num_skews/2), xlim = c(0,n[length(n)]))
+
+  #Save the best fitting n
+  binomial_fitted_est_n[k] = n[which.min(bin_error_vector)]
+  normal_fitted_est_n[k] = n[which.min(norm_error_vector)]
+  
+}
+
+```
+
+
+
+
+
+```{r}
+#Get germ layers for the filt_tissues
+
+germ_layers = vector(mode='character', length=length(filt_tissues))
+
+for( i in 1:length(filt_tissues)){
+  index = which(skew_and_stats_df$tissue == filt_tissues[i])
+  germ_layers[i]= as.character(skew_and_stats_df$germ_layer[index[1]])
+  
+}
+
+germ_layers
+
+```
+
+Also try just using the binomial variance equation, plugging in the empirical variance, using the var(unfolded(skews)) into N = p* q / var
+```{r}
+
+cell_pop_est_vector = vector(mode = 'numeric', length = length(filt_tissues))
+
+for( i in 1: length(filt_tissues)){
+  
+  skews = skew_and_stats_df$skew[skew_and_stats_df$tissue == filt_tissues[i]]
+  skew_var = var(unfold(skews))
+  estimated_n = .25/skew_var
+  cell_pop_est_vector[i] = estimated_n 
+
+}
+
+
+est_stem_cell_pop_df = data.frame(binomial_est_n = binomial_fitted_est_n, normal_est_n = normal_fitted_est_n, var_est_n = cell_pop_est_vector, 
+                                  tissues = filt_tissues, num_samples = num_samples_per_tiss, germ_layers = germ_layers)
+
+
+
+
+rownames(est_stem_cell_pop_df) = filt_tissues
+est_stem_cell_pop_df = arrange(est_stem_cell_pop_df, germ_layers)
+
+est_stem_cell_pop_df$tissues = factor(est_stem_cell_pop_df$tissues, levels = est_stem_cell_pop_df$tissues)
+est_stem_cell_pop_df
+
+```
+
+
+Estimated cell numbers are all very similar across the methods, fitting normals as a continuous approximation is a sound choice
+
+```{r}
+par(pty='s')
+
+
+p_1= ggplot(est_stem_cell_pop_df, aes(x=tissues, y=binomial_est_n, color=germ_layers, size=num_samples)) + geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), plot.title=element_text(hjust=.5), plot.margin=margin(.1,.1,.01,.1,'in'),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.y = element_text(face="bold", size=12)) + 
+  ggtitle('Tissue Stem cell population size estimates - fitting binomial percentiles') + ylab('Estimated Num of cells') +
+  xlab('Tissues') + ylim(0,25) + 
+  scale_color_manual(breaks = c('Ectoderm','Endoderm','Mesoderm'), values=c(ecto_color, endo_color, meso_color)) + 
+  geom_hline(yintercept=16, linetype='dashed', color='blue') +
+  geom_hline(yintercept=8, linetype='dashed', color='blue')
+
+
+
+p_1= ggplot(est_stem_cell_pop_df, aes(x=tissues, y=normal_est_n, color=germ_layers, size=num_samples)) + geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), plot.title=element_text(hjust=.5), plot.margin=margin(.1,.1,.01,.1,'in'),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.y = element_text(face="bold", size=12)) + 
+  ggtitle('Tissue Stem cell population size estimates - fitting normal percentiles') + ylab('Estimated Num of cells') +
+  xlab('Tissues')+ ylim(0,25)
+p_1+ scale_color_manual(breaks = c('Ectoderm','Endoderm','Mesoderm'), values=c(ecto_color, endo_color, meso_color)) + 
+  geom_hline(yintercept=16, linetype='dashed', color='blue') +
+  geom_hline(yintercept=8, linetype='dashed', color='blue')
+
+
+p_1= ggplot(est_stem_cell_pop_df, aes(x=tissues, y=var_est_n, color=germ_layers, size=num_samples)) + geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), plot.title=element_text(hjust=.5), plot.margin=margin(.1,.1,.01,.1,'in'),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.y = element_text(face="bold", size=12)) + 
+  ggtitle('Tissue Stem cell population size estimates - using variance estimate') + ylab('Estimated Num of cells') +
+  xlab('Tissues')+ ylim(0,25)
+p_1+ scale_color_manual(breaks = c('Ectoderm','Endoderm','Mesoderm'), values=c(ecto_color, endo_color, meso_color)) + 
+  geom_hline(yintercept=16, linetype='dashed', color='blue') +
+  geom_hline(yintercept=8, linetype='dashed', color='blue')
+
+
+
+pear_cor = cor(est_stem_cell_pop_df$binomial_est_n, est_stem_cell_pop_df$normal_est_n, method='pearson')
+title = sprintf('Comparing stem cell size estimates R: %f', pear_cor)
+plot(est_stem_cell_pop_df$binomial_est_n, est_stem_cell_pop_df$normal_est_n, pch=19, xlab='Estimated cell num from fitting a binomial', 
+     ylab='Estimated cell num from fitting a normal', main=title)
+abline(a=0, b=1, col='red')
+
+pear_cor = cor(est_stem_cell_pop_df$binomial_est_n, est_stem_cell_pop_df$var_est_n, method='pearson')
+title = sprintf('Comparing stem cell size estimates R: %f', pear_cor)
+plot(est_stem_cell_pop_df$binomial_est_n, est_stem_cell_pop_df$var_est_n, pch=19, xlab='Estimated cell num from fitting a binomial', ylab='Using variance estimates', main=title)
+abline(a=0, b=1, col='red')
+
+pear_cor = cor(est_stem_cell_pop_df$normal_est_n, est_stem_cell_pop_df$var_est_n, method='pearson')
+title = sprintf('Comparing stem cell size estimates R: %f', pear_cor)
+plot(est_stem_cell_pop_df$normal_est_n, est_stem_cell_pop_df$var_est_n, pch=19, xlab='Fitting Normal percentiles', ylab='Using variance estimates', main=title)
+abline(a=0, b=1, col='red')
+
+
+
+```
+
+
+
+Bootstrap the normal fitting method to get CIs. basic bootstrap with percentile CIs 
+
+```{r}
+#Function for getting a single N estimate fitting a normal distribution
+fit_normal_to_skew_dist = function(skews){
+  
+  p = .5
+  n = 2:75
+  percentiles = seq(.01, .99, 0.01)
+  norm_error_vector = vector(mode = 'numeric', length = length(n))
+  #Get the quantiles for these skews
+  empir_quants = quantile(skews, probs = percentiles, type=1)
+  #Only going to be fitting over the confident skews
+  quant_filt = empir_quants <= .4 | empir_quants >= .6
+    
+  for(i in 1:length(n)){
+    #Get the normal and binomial percentiles for the n parameter
+    norm_sd = sqrt( (p*(1-p)) / n[i] )
+    norm_percentiles = qnorm(percentiles, mean=p, sd = norm_sd)
+    #And the error between the empirical and theoretical percentiles
+    norm_error_vector[i] = sum((empir_quants[quant_filt] - norm_percentiles[quant_filt])^2)
+  }
+
+  fitted_n = n[which.min(norm_error_vector)]  
+  return(fitted_n)
+}
+
+#Function for getting a tissue's skews and random sampling them
+bootstrap_n_est_norm = function(tissue){
+  empir_skews = skew_and_stats_df$skew[skew_and_stats_df$tissue == tissue]   #Get the folded skews
+  num_samps = length(empir_skews)  #Sample number for that tissue
+  sampled_skews = sample(empir_skews, size = num_samps, replace = TRUE) #Resample the folded skews
+  fitted_n = fit_normal_to_skew_dist(unfold(sampled_skews)) #Fit the unfolded skews
+  return(fitted_n)
+}
+
+```
+
+
+```{r}
+
+num_bootstraps = 2000
+
+ci = 95
+ci_end = ((100-ci) / 2) / 100
+
+lower_ci_vec = vector(mode = 'numeric', length = length(filt_tissues))
+names(lower_ci_vec) = filt_tissues
+upper_ci_vec = vector(mode = 'numeric', length = length(filt_tissues))
+names(upper_ci_vec) = filt_tissues
+for(i in 1:length(filt_tissues)){
+
+  tissue = filt_tissues[i]
+  n_boots = unlist(mclapply(1:num_bootstraps, function(i) bootstrap_n_est_norm(tissue), mc.cores = 5))
+  n_boots = n_boots[order(n_boots)]
+  hist(n_boots, breaks = 16, main = sprintf('Bootstrap distribution of N: %i sims', num_bootstraps))
+  
+  #Basic bootstrap CIs
+  #org_fit_n = est_stem_cell_pop_df$normal_est_n[est_stem_cell_pop_df$tissues == tissue]
+  #upper_ci_vec[i] = 2*org_fit_n - n_boots[num_bootstraps * (1 - (1-ci_end))]
+  #lower_ci_vec[i] =  2*org_fit_n - n_boots[num_bootstraps * (1- ci_end)]
+  #Percentile CIs
+  lower_ci_vec[i] = n_boots[num_bootstraps * (1 - (1-ci_end))]
+  upper_ci_vec[i] = n_boots[num_bootstraps * (1- ci_end)]
+  abline(v = lower_ci_vec[i],col = 'red')
+  abline(v = upper_ci_vec[i],col = 'red')
+}
+
+#Add the CI too the dataframe
+index = match(as.character(est_stem_cell_pop_df$tissues), filt_tissues)
+lower_ci_vec = lower_ci_vec[index]
+upper_ci_vec = upper_ci_vec[index]
+
+est_stem_cell_pop_df$lower_norm_ci = lower_ci_vec
+est_stem_cell_pop_df$upper_norm_ci = upper_ci_vec
+
+
+```
+
+
+
+```{r}
+#Rearrange by germ layer and then cell number estimate
+est_stem_cell_pop_df = est_stem_cell_pop_df[order(est_stem_cell_pop_df$germ_layers, est_stem_cell_pop_df$normal_est_n, decreasing = T) , ]
+
+est_stem_cell_pop_df$tissues = factor(est_stem_cell_pop_df$tissues, levels = est_stem_cell_pop_df$tissues)
+
+```
+
+```{r}
+cell_line_index = !est_stem_cell_pop_df$tissues %in% c('Cells - Cultured fibroblasts', 'Cells - EBV-transformed lymphocytes', 'Cells - Transformed fibroblasts')
+
+mean(est_stem_cell_pop_df$normal_est_n[cell_line_index])
+
+```
+
+##########################
+Figure 5 panel b
+#########################
+
+
+```{r}
+
+ggplot(est_stem_cell_pop_df[cell_line_index, ], aes(x = tissues, y =normal_est_n, color = germ_layers)) + geom_point(size = 2) +
+  geom_errorbar(aes(x = tissues, ymin = lower_norm_ci, ymax = upper_norm_ci),size=.5, alpha = .5) + 
+  scale_color_manual(breaks = c('Ectoderm','Endoderm','Mesoderm'), values=c(ecto_color, endo_color, meso_color)) + 
+  geom_hline(yintercept=16, linetype='dashed', color='blue') +
+  geom_hline(yintercept=6, linetype='dashed', color='blue') +
+  ylab('Estimated cell number during XCI') + xlab('Tissues') +
+  scale_y_continuous(breaks=c(6, 16, 20, 25)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), 
+        plot.title=element_text(hjust=.5), plot.margin=margin(.1,.1,.01,.1,'in'),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(face="bold", size=12))
+
+
+```
+save cell number estimates
+
+```{r}
+
+save(est_stem_cell_pop_df, file = '../data/all_tissue_XCI_cell_num_ests_df.Rdata')
+
+```
+
+
+Visualize the fitted distributions over the empirical distributions
+
+Example with Whole Blood
+```{r}
+current_tissue = filt_tissues[49]
+fitted_normal_n = est_stem_cell_pop_df$normal_est_n[est_stem_cell_pop_df$tissues == current_tissue]
+sigma = sqrt(p*(1-p)/fitted_normal_n)
+dnorm_x = 0:1000/1000
+
+fitted_normal = dnorm(dnorm_x, mean=p, sd = sigma)
+
+theoretical_norms = list()
+n = c(4,8,16,32)
+for(i in 1:length(n)){ 
+  sigma_t = sqrt(p*(1-p)/n[i])
+  #theoretical_norms[[i]] = dnorm(dnorm_x, mean=p, sd = sigma)
+  theoretical_norms[[i]] = sigma_t
+}
+
+skews = unfold(skew_and_stats_df$skew[skew_and_stats_df$tissue == current_tissue])
+
+num_bins = 50
+fill_vec = rep('dodgerblue', num_bins+1)
+fill_vec[21:31] = 'grey'
+color_vec = rep('black', num_bins+1)
+color_vec[21:31] = 'grey'
+df = data.frame(skews = skews)
+
+ggplot(df, aes(x = skews)) + geom_histogram(aes(y = ..density..), fill = fill_vec, color = color_vec, binwidth = 1/num_bins) +
+  xlim(0,1)+ xlab(sprintf('%s XCI skews', current_tissue)) +
+  stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[1]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'dashed')) +
+  stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[2]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'dotted')) + 
+  stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[3]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'dotdash')) +
+  stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[4]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'twodash')) +
+  stat_function(fun = dnorm, args = list(mean = .5, sd = sigma), n = num_bins, size = 2, aes(linetype = 'solid')) +
+  scale_linetype_manual(name="Estimated cell number",values=c('dashed','dotted','dotdash','twodash','solid'),
+                        labels = c('4 cells','8 cells','16 cells','32 cells',sprintf('Estimated %i cells', fitted_normal_n)),
+                        breaks=c('dashed','dotted','dotdash','twodash','solid'), 
+                        guide = guide_legend(override.aes = list(size = c(.5, .5, .5, .5, 2)))) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12), 
+        legend.position = c(.85,.75))
+
+```
+
+
+Pared down version with only the best fitting line
+```{r}
+
+ggplot(df, aes(x = skews)) + geom_histogram(aes(y = ..density..), fill = fill_vec, color = color_vec, binwidth = 1/num_bins) +
+  xlim(0,1)+ xlab(sprintf('%s XCI skews', current_tissue)) +
+  stat_function(fun = dnorm, args = list(mean = .5, sd = sigma), n = num_bins, size = 3, aes(linetype = 'solid')) +
+  scale_linetype_manual(name="Estimated cell number",values=c('solid'),
+                        labels = c(sprintf('Estimated %i cells', fitted_normal_n)),
+                        breaks=c('solid')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12), 
+        legend.position = c(.85,.75))
+
+```
+
+###########################
+Supplemental figure 8
+###########################
+
+
+```{r}
+p = .5
+num_bins = 50
+#Greying out the .4-.6 skews
+fill_vec = rep('dodgerblue', num_bins+1)
+fill_vec[21:31] = 'grey'
+color_vec = rep('black', num_bins+1)
+color_vec[21:31] = 'grey'
+
+for(j in 1:length(filt_tissues)){
+
+  current_tissue = filt_tissues[j]
+  fitted_normal_n = est_stem_cell_pop_df$normal_est_n[est_stem_cell_pop_df$tissues == current_tissue]
+  sigma = sqrt(p*(1-p)/fitted_normal_n)
+  dnorm_x = 0:1000/1000
+  
+  fitted_normal = dnorm(dnorm_x, mean=p, sd = sigma)
+  
+  theoretical_norms = list()
+  n = c(4,8,16,32)
+  for(i in 1:length(n)){ 
+    sigma_t = sqrt(p*(1-p)/n[i])
+    #theoretical_norms[[i]] = dnorm(dnorm_x, mean=p, sd = sigma)
+    theoretical_norms[[i]] = sigma_t
+  }
+  
+  skews = unfold(skew_and_stats_df$skew[skew_and_stats_df$tissue == current_tissue])
+  df = data.frame(skews = skews)
+  
+  g = ggplot(df, aes(x = skews)) + geom_histogram(aes(y = ..density..), fill = fill_vec, color = color_vec, binwidth = 1/num_bins) +
+    xlim(0,1)+ xlab(sprintf('%s XCI skews', current_tissue)) +
+    stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[1]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'dashed')) +
+    stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[2]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'dotted')) + 
+    stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[3]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'dotdash')) +
+    stat_function(fun = dnorm, args = list(mean = .5, sd = theoretical_norms[[4]]), n = num_bins, size = .75, alpha = .5, aes(linetype = 'twodash')) +
+    stat_function(fun = dnorm, args = list(mean = .5, sd = sigma), n = num_bins, size = 2, aes(linetype = 'solid')) +
+    scale_linetype_manual(name="Estimated cell number",values=c('dashed','dotted','dotdash','twodash','solid'),
+                          labels = c('4 cells','8 cells','16 cells','32 cells',sprintf('Estimated %i cells', fitted_normal_n)),
+                          breaks=c('dashed','dotted','dotdash','twodash','solid'), 
+                          guide = guide_legend(override.aes = list(size = c(.5, .5, .5, .5, 2)))) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+          panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+          axis.text.y = element_text(size=12), axis.text.x = element_text(size=12),
+          axis.title.y = element_text(size=12), axis.title.x = element_text(size=12), 
+          legend.position = c(.8,.75))  
+  print(g)
+  
+  #Pared down version
+  g1 = ggplot(df, aes(x = skews)) + geom_histogram(aes(y = ..density..), fill = fill_vec, color = color_vec, binwidth = 1/num_bins) +
+  xlim(0,1)+ xlab(sprintf('%s XCI skews', current_tissue)) +
+  stat_function(fun = dnorm, args = list(mean = .5, sd = sigma), n = num_bins, size = 3, aes(linetype = 'solid')) +
+  scale_linetype_manual(name="Estimated cell number",values=c('solid'),
+                        labels = c(sprintf('Estimated %i cells', fitted_normal_n)),
+                        breaks=c('solid')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(size=12), axis.text.x = element_text(size=12),
+        axis.title.y = element_text(size=12), axis.title.x = element_text(size=12), 
+        legend.position = c(.85,.75))
+  
+}
+
+```
+
+
+#################################################
+Variance of skews within individuals
+#################################################
+
+
+
+1.) Distribution of skew standard deviations for donors across tissues
+2.) Distribution of deviance from mean donor folded skew per tissue, unfolded mean is goinng to be .5
+
+
+```{r}
+#Only sticking with the filtered tissues
+tissues =  filt_tissues
+length(tissues)
+```
+
+
+
+######################################
+wilcoxen rank sum test as a classifier
+######################################
+
+
+```{r}
+#Testing getting different AUCs from the wilcoxen rank sum test, trying to get an intuition for things
+
+auc_wcrst <- function(labels, scores){
+  labels <- as.logical(labels)
+  n1 <- sum(labels)   #Number of positives
+  n2 <- sum(!labels)  #Number of negatives
+  R1 <- sum(rank(scores)[labels])   #Rank sum of positives
+  U1 <- R1 - ((n1 * (n1 + 1))/2 )       #U-statistic
+  return(U1/(n1 * n2))                      #AUC calculation
+  
+  
+}
+
+```
+
+
+Make a function to draw an ROC curve
+
+```{r}
+
+#Input mean donor skews and tissue skews and a threshold
+get_roc = function(mean_donor_skews, tissue_skews, threshold){
+  #Classify by the mean donor skews
+  classifier = mean_donor_skews >= threshold
+  #Rank by the tissue skews
+  rank_index = order(tissue_skews, decreasing = TRUE)
+  tissue_skews = tissue_skews[rank_index]
+  classifier = classifier[rank_index]
+  
+  #If there's no positives, just return NA
+  if(sum(classifier) == 0){return(NA)}
+  
+  #Also get the AUC and pvalue
+  auc = auc_wcrst(classifier, tissue_skews)
+  MWU_test = suppressWarnings(wilcox.test(tissue_skews[classifier], tissue_skews[!classifier], alternative='two.sided'))
+  auc_pvalue = MWU_test$p.value
+  
+  #Set up FPR (x-axis) and TPR (y-axis) vectors
+  x_vec = vector(mode = 'numeric', length = length(classifier) + 1)
+  y_vec = vector(mode = 'numeric', length = length(classifier) + 1)
+  x_vec[1] = 0
+  y_vec[1] = 0
+  
+  #Go through the ranked list, when a negative comes up, increment x_axis by one. When positive, increment y-axis by 1
+  for( i in 1:length(classifier)){
+    
+    if(classifier[i] == 0){
+      x_vec[i+1] = x_vec[i] + 1
+      y_vec[i+1] = y_vec[i]
+      }else{
+      x_vec[i+1] = x_vec[i]
+      y_vec[i+1] = y_vec[i] + 1}  
+  }
+  #Normalize by the total number of negatives and positives
+  x_vec = x_vec / sum(!classifier)
+  y_vec = y_vec / sum(classifier)
+
+  #Just make an equal length vector for the AUC
+  auc_vec = rep(auc, length(classifier)+1)
+  auc_pvalue_vec = rep(auc_pvalue, length(classifier)+1)
+  
+  roc_coords = data.frame(FPR = x_vec, TPR = y_vec, AUC = auc_vec, pvalue = auc_pvalue_vec)
+  return(roc_coords)
+}
+
+mean_donor_skews = sample(seq(.5,1, .001), 50, replace = T)
+tissue_skews = sample(seq(.5,1, .001), 50, replace = T)
+threshold = .7
+
+test = get_roc(mean_donor_skews, tissue_skews, threshold)
+test
+plot(test$FPR, test$TPR, type = 'l',lty = 1)
+
+
+
+```
+
+
+#######################################
+Trying out some classifier approaches to interrogating skew
+1.) Can the skew of a tissue predict the more generally skewed donors? Ranking the skew of a tissue and see if it can predict the mean skew of the donor. Withold the skew of the tissue from the mean calculation
+  
+#######################################
+
+function to go through tissues and get the donor mean skew and tissue skews
+```{r}
+
+get_mean_donor_and_tissue_skews = function(current_tiss){
+
+  #Get the donors for that tissue
+  donors_for_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == current_tiss])
+  num_donors = length(donors_for_tiss) 
+  if(num_donors == 0){return(NA)}
+  #To store the tissue mean skew deviances from each donor, and the skew of the tissue
+  tiss_donor_skew = vector(mode='numeric', length = num_donors)
+  donor_mean_skews = vector(mode='numeric', length = num_donors)
+  
+  #Go through the donors
+  for(j in 1:num_donors){
+  
+    temp_donor = donors_for_tiss[j]
+    if(dim(skew_and_stats_df[skew_and_stats_df$donor == temp_donor, ])[1] <=1 ){next} #Only one tissue for that donor
+    
+    #get the mean folded skew for the donor, withold the current tissue skew
+    donor_mean_skews[j] = mean(skew_and_stats_df$skew[skew_and_stats_df$donor == temp_donor & skew_and_stats_df$tissue != current_tiss])
+    
+    #Get the skew of that tissue from that donor
+    #So there are a few tissues that have multiple samples from the same donor. Just averaging the skew estimates at the moment.
+    tiss_donor_skew[j] = mean(skew_and_stats_df$skew[skew_and_stats_df$donor == temp_donor & skew_and_stats_df$tissue == current_tiss])
+  }
+  
+  skew_df = data.frame(donor_mean_skews = donor_mean_skews, tissue_skews = tiss_donor_skew)
+  return(skew_df)
+}
+
+```
+
+
+################################
+Supplemental Figure 6 panel a
+################################
+
+
+```{r}
+
+all_roc_funcs = function(threshold, file_label, dens_adjust = 1){
+
+  
+  auc_pvalue_vec = c()
+  
+  for(i in 1:length(tissues)){
+    current_tiss = tissues[i]
+  
+    #Get the mean donor skews and tissue skews
+    skew_df = get_mean_donor_and_tissue_skews(current_tiss)
+    if(is.null(dim(skew_df))){next}
+    donor_mean_skews = skew_df$donor_mean_skews
+    tiss_donor_skew = skew_df$tissue_skews
+    
+    #Get pvalues for the AUCs, only going to plot the ROC curves for the sig AUCs
+    classifier = donor_mean_skews >= threshold
+    
+    #If there's no positives, just move on
+    if(sum(classifier) == 0){next}
+    MWU_test = suppressWarnings(wilcox.test(tiss_donor_skew[classifier], tiss_donor_skew[!classifier], alternative='two.sided'))
+    auc_pvalue_vec[i] = MWU_test$p.value
+  }
+  
+  auc_pvalue_vec = p.adjust(auc_pvalue_vec, method = 'BH')
+  sig_auc_index = which(auc_pvalue_vec <= .05)
+  
+  
+  
+  par(pty = 's')
+  title = sprintf('Mean donor skew threshold: %0.2f', threshold)
+  plot(1, type="l", xlab="FPR", ylab="TPR", xlim=c(0, 1), ylim=c(0, 1), main = title)
+  
+  #Now go through and only plot the ROC curves for the significant AUCs
+  auc = c()
+  all_roc_df = data.frame(FPR = double(), TPR = double(), AUC = double(), pvalue = double())
+  for(i in sig_auc_index){
+    current_tiss = tissues[i]
+  
+    #Get the mean donor skews and tissue skews
+    skew_df = get_mean_donor_and_tissue_skews(current_tiss)
+    #if(is.null(dim(skew_df))){next}
+    donor_mean_skews = skew_df$donor_mean_skews
+    tiss_donor_skew = skew_df$tissue_skews
+    
+    roc_dataframe = get_roc(donor_mean_skews, tiss_donor_skew, threshold)
+    #Grab the AUC for later
+    auc = c(auc, roc_dataframe$AUC[1])
+    #Plot that tissue's ROC
+    lines(roc_dataframe$FPR, roc_dataframe$TPR, type = 'l', lty = 1)
+    #Save it
+    all_roc_df = rbind(all_roc_df, roc_dataframe)
+  }
+  
+  abline(a = 0, b = 1, col = 'red')
+  
+  #Plot the ROCs as a 2d density plot
+  p = ggplot(all_roc_df, aes(x=FPR, y=TPR) ) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE, n = 200, adjust = dens_adjust) +
+  scale_fill_distiller(palette= "Blues", direction=1) +
+  ylim(0,1) + xlim(0,1) + coord_fixed() +
+  ylab('TPR') + xlab('FPR') + ggtitle(sprintf('Threshold: %1.2f',threshold)) +
+  geom_abline(slope = 1, intercept = 0, color = 'red') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+       panel.border = element_rect(colour = "black", fill=NA, size=1),
+       plot.title = element_text(hjust = .5), 
+       axis.title.y = element_text(size =12), axis.text.y = element_text(size = 12), 
+       axis.title.x = element_text(size = 12), axis.text.x = element_text(size = 12),
+       panel.background = element_rect(fill = 'white'))
+  
+  print(p)
+  #Get a dataframe of the significant AUCs for plotting later
+  auc_label = rep(sprintf('Mean donor skew threshold: %0.2f', threshold), length(sig_auc_index))
+  auc_df = data.frame(auc = auc, label = auc_label, tissue = tissues[sig_auc_index])
+  
+  return(auc_df)
+
+}
+
+sig_auc_60_df = all_roc_funcs(threshold = .60, file_label = '60', dens_adjust = 2)
+sig_auc_65_df = all_roc_funcs(threshold = .65, file_label = '65', dens_adjust = 2)
+sig_auc_70_df = all_roc_funcs(threshold = .70, file_label = '70', dens_adjust = 2)
+sig_auc_75_df = all_roc_funcs(threshold = .75, file_label = '75', dens_adjust = 2)
+
+
+
+
+```
+
+
+Get the average AUC
+
+```{r}
+mean(sig_auc_60_df$auc)
+mean(sig_auc_65_df$auc)
+mean(sig_auc_70_df$auc)
+mean(sig_auc_75_df$auc)
+```
+
+
+```{r}
+all_threshold_auc_df = rbind(sig_auc_60_df, sig_auc_65_df, sig_auc_70_df, sig_auc_75_df)
+all_threshold_auc_df
+all_threshold_auc_df$label = factor(all_threshold_auc_df$label, levels = c("Mean donor skew threshold: 0.75","Mean donor skew threshold: 0.70",
+                                                                           "Mean donor skew threshold: 0.65","Mean donor skew threshold: 0.60"))
+```
+
+##########################
+Supplemental Figure 6 panel b
+##########################
+
+
+```{r}
+
+ggplot(all_threshold_auc_df, aes(x= auc, y = label)) + geom_violin() + geom_jitter(height = 0.1, width = 0, alpha = .5, size = 2) +
+  xlim(.5,1) + xlab('AUC') +
+  scale_y_discrete(position = "right") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.title.x = element_text(size = 12), axis.text.x = element_text(size = 12),
+        axis.title.y = element_blank(), axis.text.y = element_text(size = 12), 
+        plot.title = element_text(size = 12, hjust = .5), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        panel.background = element_rect(fill = 'white'))
+
+
+```
+
+Look at the variance in skew per tissue
+Did this previously in different ways, but just do similar bar plots as above to show the ranking of tissue skew variance
+
+```{r}
+tiss_skew_variance = vector(mode='numeric', length=length(tissues))
+
+for(i in 1:length(tissues)){
+  current_tiss = tissues[i]
+  
+  tiss_skew_variance[i] = var(skew_and_stats_df$skew[skew_and_stats_df$tissue == current_tiss])
+  
+}
+
+index = order(tiss_skew_variance)
+par(mar = c(12,4,2,2))
+barp = barplot(tiss_skew_variance[index] , names = tissues[index], main = 'Tissue skew variance', ylab = 'skew variance', las=2, col = 'grey', cex.names=.65)
+
+```
+
+
+
+
+############################################
+tissue lineage specific stemcell population estimates
+
+Skew of tissue will follow a binomial distribution where N = num_cells_tiss and p = skew of the donor (estimating it as the mean skew)
+But, each instance of a tissue will be coming from a different donor who will have a different P. 
+What we want is the deviance from the mean, the variance there is indicative of the num_cells_tiss, 
+So, turn everything into a Z-score and solve for the standard normal distribution
+
+Remember SD of the skews is sqrt( p*q / N )
+p  = mean donor skew
+N = num_cells_tiss
+
+Zi = skew_i - p / sqrt( p*q / N )  
+
+So the donor mean is going to be different, but N is a constant. And we know the SD of zscores is equal to 1. So just solve for N setting the SD(z-scores) to 1
+
+Rewrite zscores:  zi = ti*sqrt(N) where ti = skew_i - p / sqrt(pq)
+
+SD(ti*sqrt(N)) = 1
+
+so
+sqrt( 1/m-1 * sum( (zi - mean(z)) ^2) ) = 1
+taking out the sqrt(N) term in the zi and z_bar terms gets
+
+sqrt( 1/m-1 * N * sum( (ti - mean(t)) ^2) ) = 1
+
+Solving for N gets  N = m-1 / sum( (ti - mean(t)) ^2) where m is the number of tissue samples
+
+Can simulate/bootstrap error to get confidence intervals around the N estimate
+
+
+###############################################
+
+
+
+Function to bootstrap the actual t values
+
+```{r}
+
+bootstrap_t_values = function(t_vec){
+  m = length(t_vec)
+  simulation = sample(t_vec, size = m, replace = TRUE)
+  t_bar_sim = mean(simulation)
+  N = (m-1) / sum((simulation - t_bar_sim)^2)
+  return(N)
+}
+
+
+```
+
+
+
+```{r}
+num_bootstraps = 2000
+
+ci = 95
+ci_end = ((100-ci) / 2) / 100
+
+n_vec = vector(mode = 'numeric', length = length(tissues))
+num_samples_per_tiss = vector(mode = 'numeric', length = length(tissues))
+upper_ci_vec_error = vector(mode = 'numeric', length = length(tissues))
+lower_ci_vec_error = vector(mode = 'numeric', length = length(tissues))
+upper_ci_vec_skew_boot = vector(mode = 'numeric', length = length(tissues))
+lower_ci_vec_skew_boot = vector(mode = 'numeric', length = length(tissues))
+
+for(i in 1:length(tissues)){
+
+  
+  current_tiss = tissues[i]
+  #Get the donors for that tissue
+  donors_for_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == current_tiss])
+  num_donors = length(donors_for_tiss)
+  t_vec = vector(mode = 'numeric', length = num_donors)
+  if(num_donors == 0){next}
+  
+  #Go through the donors
+  for(j in 1:num_donors){
+  
+    temp_donor = donors_for_tiss[j]
+    if(dim(skew_and_stats_df[skew_and_stats_df$donor == temp_donor, ])[1] <=1 ){next} #Only one tissue for that donor
+    #get the mean folded skew for the donor, withold the current tissue skew
+    donor_mean_skew = mean(skew_and_stats_df$skew[skew_and_stats_df$donor == temp_donor & skew_and_stats_df$tissue != current_tiss])
+    
+    #Get the skew of that tissue from that donor
+    #So there are a few tissues that have multiple samples from the same donor. Just averaging the skew estimates at the moment.
+    tiss_donor_skew = mean(skew_and_stats_df$skew[skew_and_stats_df$donor == temp_donor & skew_and_stats_df$tissue == current_tiss])
+    
+    #Get the t value
+    t = (tiss_donor_skew - donor_mean_skew) / (sqrt(donor_mean_skew * (1-donor_mean_skew)))
+    t_vec[j] = t
+  
+  }
+   
+  #Unfold the results
+  t_vec = c(t_vec, -1*t_vec)
+  
+  #Get the N estimate
+  m = length(t_vec)
+  t_bar = mean(t_vec)
+  N = (m-1) / sum((t_vec - t_bar)^2)
+  n_vec[i] =  N
+  
+  t_vec_bootstrap_n = unlist(mclapply(1:num_bootstraps, function(i) bootstrap_t_values(t_vec) ))
+  t_vec_bootstrap_n = t_vec_bootstrap_n[order(t_vec_bootstrap_n)]
+  n_lower_ci = t_vec_bootstrap_n[num_bootstraps * (1 - (1 - ci_end))]
+  n_upper_ci = t_vec_bootstrap_n[num_bootstraps *  (1 - ci_end)]
+  lower_ci_vec_skew_boot[i] = n_lower_ci
+  upper_ci_vec_skew_boot[i] = n_upper_ci 
+ 
+  #Save the number of samples per tissue
+  num_samples_per_tiss[i] =  m
+  
+  #And look at the plot of the supposed Z-scores, ti*sqrt(N)
+  z_scores = t_vec * sqrt(N)
+  title = sprintf('%s z_scores, N: %.3f , SD: %.3f', current_tiss, N, sd(z_scores))
+  hist(z_scores, xlim = c(-4, 4), main = title, breaks = 16)
+  
+  title = sprintf('%s t values', current_tiss)
+  hist(t_vec, xlim = c(min(t_vec)-.1, max(t_vec)+.1), main = title, breaks = 16)
+
+}
+
+  
+#Get the germlayers for the filtered tissues
+germ_layers = vector(mode='character', length=length(tissues))
+
+for( i in 1:length(tissues)){
+  index = which(skew_and_stats_df$tissue == tissues[i])
+  germ_layers[i]= as.character(skew_and_stats_df$germ_layer[index[1]])
+}
+
+
+est_tissue_lineage_cell_num_df = data.frame(est_n = n_vec, upper_ci_skew = upper_ci_vec_skew_boot, lower_ci_skew = lower_ci_vec_skew_boot,
+                                  tissues = tissues, num_samples = num_samples_per_tiss, germ_layers = germ_layers)
+
+rownames(est_tissue_lineage_cell_num_df) = tissues
+
+
+#Group by estimated number
+est_tissue_lineage_cell_num_df = est_tissue_lineage_cell_num_df[order(est_tissue_lineage_cell_num_df$est_n), ]
+
+
+#And reset the factor levels for the tissues
+est_tissue_lineage_cell_num_df$tissues = factor(est_tissue_lineage_cell_num_df$tissues, levels = est_tissue_lineage_cell_num_df$tissues)
+est_tissue_lineage_cell_num_df 
+```
+
+Also replot the average deviance from donor skew per tissue, matching the order of the cell num estimates
+
+```{r}
+cell_line_index = !est_tissue_lineage_cell_num_df$tissues %in% c('Cells - Cultured fibroblasts','Cells - EBV-transformed lymphocytes','Cells - Transformed fibroblasts')
+tiss_to_match = as.character(est_tissue_lineage_cell_num_df[cell_line_index,'tissues' ])
+
+
+tiss_ordered_by_dev_var = levels(deviance_plotting_df$tissue)
+
+var_dev_df = deviance_plotting_df %>%
+  group_by(tissue) %>%
+  summarise_at(vars(deviance), funs(var(., na.rm=TRUE)))
+
+
+tiss_ordered_by_dev_var = levels(var_dev_df$tissue)
+index = match(tiss_to_match,tiss_ordered_by_dev_var )
+
+var_dev_df = var_dev_df[index, ]
+var_dev_df
+```
+
+
+##############################
+Figure 5 panel d
+##############################
+
+```{r}
+
+barplot(var_dev_df$deviance, names = as.character(var_dev_df$tissue), ylab = 'Variance in skew deviation from mean donor skew', las=2, col = 'grey', cex.names=.65, cex.lab=.75)
+
+```
+
+
+```{r}
+cell_line_index = !est_tissue_lineage_cell_num_df$tissues %in% c('Cells - Cultured fibroblasts','Cells - EBV-transformed lymphocytes','Cells - Transformed fibroblasts')
+
+ggplot(est_tissue_lineage_cell_num_df[cell_line_index, ], aes(x=tissues, y=est_n)) + geom_point( size = 2) + 
+  geom_errorbar(aes(x = tissues, ymin = lower_ci_skew, ymax = upper_ci_skew),size=.5, alpha = .5) +
+  ggtitle('Tissue specific cell estimates') + ylab('# cells at time of tissue specification') + xlab('Tissues') +
+  scale_color_manual(breaks = c('Ectoderm','Endoderm','Mesoderm'), values=c(ecto_color, endo_color, meso_color)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), 
+        plot.title=element_text(hjust=.5), plot.margin=margin(.1,.1,.01,.1,'in'),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1),  
+        axis.text.y = element_text(face="bold", size=12))
+
+```
+
+Save cell number estimates
+
+
+```{r}
+
+save(est_tissue_lineage_cell_num_df, 
+     file = '../data/tissue_specific_lineage_cell_num_ests_df.Rdata')
+
+```
+
+
+
+
+
+
+################################################
+All pairwise tissue XCI ratio correlations
+###############################################
+
+
+
+Redo the tiss_tiss_donors_df and the tiss_tiss_donors_names_matrices for the filtered tissues
+```{r}
+filt_tissues
+tissues = filt_tissues
+
+```
+
+
+```{r}
+tiss_tiss_donors_df = as.data.frame(matrix(nrow = length(tissues), ncol = length(tissues)))
+rownames(tiss_tiss_donors_df) = tissues
+colnames(tiss_tiss_donors_df) = tissues
+
+tiss_tiss_donors_names_matrix = matrix(rep(list(), length(tissues)*length(tissues)), nrow=length(tissues), ncol=length(tissues))
+rownames(tiss_tiss_donors_names_matrix) = tissues
+colnames(tiss_tiss_donors_names_matrix) = tissues
+
+for(i in 1:length(tissues)){
+  
+  current_tiss = tissues[i]
+  
+  for(j in 1: length(tissues)){
+    
+    next_tiss = tissues[j]
+    
+    donors_for_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == current_tiss])
+    #Just going to ignore the donors that have multiple donations for the same tiss
+    duplicates = donors_for_tiss[duplicated(donors_for_tiss)] 
+    donors_for_tiss = donors_for_tiss[!donors_for_tiss %in% duplicates]  
+    
+    donors_for_next_tiss = as.character(skew_and_stats_df$donor[skew_and_stats_df$tissue == next_tiss])
+    duplicates = donors_for_next_tiss[duplicated(donors_for_next_tiss)] 
+    donors_for_next_tiss = donors_for_next_tiss[!donors_for_next_tiss %in% duplicates]
+    
+    tiss_tiss_donors_df[i,j] = sum(unique(donors_for_tiss) %in% unique(donors_for_next_tiss))
+    tiss_tiss_donors_names_matrix[i,j] = list(unique(donors_for_tiss[donors_for_tiss %in% donors_for_next_tiss]))
+  }
+}
+
+tiss_tiss_donors_df
+tiss_tiss_donors_names_matrix
+
+```
+
+
+
+Get a binary matrix too for which donors donate which tissues
+
+```{r}
+diagonal = diag(tiss_tiss_donors_names_matrix)
+
+
+binary_tissue_donor_matrix = matrix(nrow = length(names(diagonal)), ncol = length(donors))
+rownames(binary_tissue_donor_matrix) = names(diagonal)
+colnames(binary_tissue_donor_matrix) = donors
+
+for(i in 1:length(names(diagonal))){
+  
+  donors_for_tiss = diagonal[[i]]
+  index = colnames(binary_tissue_donor_matrix) %in% donors_for_tiss
+  binary_tissue_donor_matrix[i, index] = 1
+  binary_tissue_donor_matrix[i, !index] = 0
+}
+
+
+binary_tissue_donor_matrix = binary_tissue_donor_matrix[!rownames(binary_tissue_donor_matrix) %in% c('Testis','Prostate','body_site_s'), ]
+
+
+```
+
+
+
+For permutation test and bootstrap CI of pearson correlations
+
+```{r}
+
+
+bootstrap_corrs_func = function(x,y){
+  index = 1:length(x)
+  bootstrap = sample(index, size = length(x), replace=TRUE)
+  corr = suppressWarnings(cor(x[bootstrap], y[bootstrap], method='pearson'))
+  return(corr)
+}
+
+
+cor_permute = function(x,y){
+  permute_y = sample(y,size=length(y), replace=FALSE)
+  corr = suppressWarnings(cor(x,permute_y, method='pearson'))
+  return(corr)
+}
+
+
+
+
+```
+
+
+```{r}
+
+
+
+tiss_tiss_correlation_matrix = matrix(nrow=length(tissues), ncol=length(tissues))
+rownames(tiss_tiss_correlation_matrix) = tissues
+colnames(tiss_tiss_correlation_matrix) = tissues
+
+tiss_tiss_corr_pvalues = matrix(nrow=length(tissues), ncol=length(tissues))
+rownames(tiss_tiss_corr_pvalues) = tissues
+colnames(tiss_tiss_corr_pvalues) = tissues
+
+tiss_tiss_corr_lowerCI = matrix(nrow=length(tissues), ncol=length(tissues))
+rownames(tiss_tiss_corr_lowerCI) = tissues
+colnames(tiss_tiss_corr_lowerCI) = tissues
+
+tiss_tiss_corr_upperCI = matrix(nrow=length(tissues), ncol=length(tissues))
+rownames(tiss_tiss_corr_upperCI) = tissues
+colnames(tiss_tiss_corr_upperCI) = tissues
+
+num_permutes = 10000  #For correlation permutation test
+num_bootstraps = 10000 #For correlation bootstrapping CI
+
+
+
+all_skews = c()
+
+
+for(i in 1:length(tissues)){
+  
+  tiss_1 = rownames(tiss_tiss_donors_names_matrix)[i]
+
+  for(j in 1:length(tissues)){
+
+    tiss_2 = colnames(tiss_tiss_donors_names_matrix)[j]
+    test_donors = tiss_tiss_donors_names_matrix[[i,j]]
+    
+    if(length(test_donors) <= 1){next}
+    #Make sure to reorder the skews so the donor order matches the test_donor order. Ensures that the order of skew for both tissues is the same by donor
+    tiss_1_skews = skew_and_stats_df$skew[skew_and_stats_df$tissue == tiss_1 & skew_and_stats_df$donor %in% test_donors]
+    tiss_1_donors = skew_and_stats_df$donor[skew_and_stats_df$tissue == tiss_1 & skew_and_stats_df$donor %in% test_donors]
+    index_1 = match(test_donors, tiss_1_donors)
+    tiss_1_skews = tiss_1_skews[index_1]
+    
+    
+    tiss_2_skews = skew_and_stats_df$skew[skew_and_stats_df$tissue == tiss_2 & skew_and_stats_df$donor %in% test_donors]
+    tiss_2_donors = skew_and_stats_df$donor[skew_and_stats_df$tissue == tiss_2 & skew_and_stats_df$donor %in% test_donors]
+    index_2 = match(test_donors, tiss_2_donors)
+    tiss_2_skews = tiss_2_skews[index_2]
+    
+    #get the pearson correlation
+    original_cor = cor(tiss_1_skews, tiss_2_skews, method = 'pearson')
+    if(original_cor <= .7 & original_cor >= .5){
+      y_title = sprintf("%s skews",tiss_2)
+      x_title = sprintf("%s skews", tiss_1)
+      
+    }
+    tiss_tiss_correlation_matrix[i,j] = original_cor
+    
+    #Do permutation and bootstrapping to get a correlation pvalue and CI
+    permute_cors = unlist(mclapply(1:num_permutes, function(i) cor_permute(tiss_1_skews,tiss_2_skews), mc.cores=5))
+    tiss_tiss_corr_pvalues[i,j] = sum(abs(permute_cors) > abs(original_cor) ) / num_permutes
+  
+  }
+  print(sprintf('Done with %s at %s', tiss_1, Sys.time()))
+  
+}
+
+
+
+```
+
+Save the correlations for later
+
+```{r}
+save(tiss_tiss_correlation_matrix, tiss_tiss_corr_pvalues, tiss_tiss_corr_lowerCI, tiss_tiss_corr_upperCI, 
+     file = '../data/v8_pairwise_tissue_skew_correlations.Rdata')
+```
+
+```{r}
+load(file = '../data/v8_pairwise_tissue_skew_correlations.Rdata')
+```
+
+
+Pull out within and across germ layer comparisons for demonstration
+within: Colon - Sigmoid and Esophagus - Gastroesophageal Junction
+across: Nerve - Tibial and Adipose - Subcutaneous (ectoderm, mesoderm)
+
+
+############################
+Figure 4 panel b
+############################
+
+
+
+```{r}
+
+for(i in 1:length(tissues)){
+  
+  tiss_1 = rownames(tiss_tiss_donors_names_matrix)[i]
+
+  for(j in 1:length(tissues)){
+
+    tiss_2 = colnames(tiss_tiss_donors_names_matrix)[j]
+    test_donors = tiss_tiss_donors_names_matrix[[i,j]]
+
+    if(length(test_donors) <= 1){next}
+    #Make sure to reorder the skews so the donor order matches the test_donor order. Ensures that the order of skew for both tissues is the same by donor
+    tiss_1_skews = skew_and_stats_df$skew[skew_and_stats_df$tissue == tiss_1 & skew_and_stats_df$donor %in% test_donors]
+    tiss_1_donors = skew_and_stats_df$donor[skew_and_stats_df$tissue == tiss_1 & skew_and_stats_df$donor %in% test_donors]
+    index_1 = match(test_donors, tiss_1_donors)
+    tiss_1_skews = tiss_1_skews[index_1]
+    
+    tiss_2_skews = skew_and_stats_df$skew[skew_and_stats_df$tissue == tiss_2 & skew_and_stats_df$donor %in% test_donors]
+    tiss_2_donors = skew_and_stats_df$donor[skew_and_stats_df$tissue == tiss_2 & skew_and_stats_df$donor %in% test_donors]
+    index_2 = match(test_donors, tiss_2_donors)
+    tiss_2_skews = tiss_2_skews[index_2]
+    
+    #Also get the pearson correlation
+    original_cor = cor(tiss_1_skews, tiss_2_skews, method = 'pearson')
+
+    par(pty = 's')
+    plot(tiss_1_skews, tiss_2_skews, xlim = c(.5,1), ylim = c(.5,1), xlab = sprintf('%s XCI skew',tiss_1), ylab = sprintf('%s XCI skew',tiss_2), pch = 19, cex = .75, 
+         main = sprintf('correlation %0.3f', original_cor))
+    
+  }
+}
+
+```
+
+Look at the ones that have high correlations
+
+```{r}
+
+for(i in 1:length(tissues)){
+  
+  tiss_1 = tissues[i]
+  tiss_corrs = tiss_tiss_correlation_matrix[tiss_1, ]
+  high_corr_index = which(tiss_corrs >= .65)
+  good_tiss = tissues[high_corr_index]
+  for(j in 1:length(good_tiss)){
+    
+    print(sprintf('%s and %s', tiss_1, good_tiss[j]))
+    
+  }
+  
+}
+
+
+```
+
+
+Correct all pvalues
+```{r}
+unit = dim(tiss_tiss_corr_pvalues)[1]
+vec_pvals = c(tiss_tiss_corr_pvalues)
+vec_pvals = p.adjust(vec_pvals, method = 'BH')
+matrix_pvals = matrix(vec_pvals, unit, unit)
+non_sig_corrs_index = matrix_pvals > .05
+
+```
+
+
+
+```{r}
+#Get germ layers for the filt_tissues
+
+germ_layers = vector(mode='character', length=length(rownames(temp_corr_matrix)))
+
+for( i in 1:length(rownames(temp_corr_matrix))){
+  index = which(skew_and_stats_df$tissue == rownames(temp_corr_matrix)[i])
+  germ_layers[i]= as.character(skew_and_stats_df$germ_layer[index[1]])
+  
+}
+
+germ_layers
+
+```
+
+
+Plot the heatmaps for intra and inter germ layer comparisons
+
+```{r}
+germ_layer_colors
+
+```
+
+
+###############################
+Supplemental figure 6 panel c
+##############################
+
+
+```{r}
+
+col_fun_2 = colorRamp2(c(-1,0, 1), c("blue" ,"white", "red"))
+lgd = Legend(col_fun = col_fun_2, title = 'Pearson')
+germ_layer_lgd = Legend(labels = c('Ectoderm', 'Mesoderm', 'Endoderm'), title = "germ layer", legend_gp = gpar(fill = c(ecto_color, meso_color, endo_color)))
+legend_list = packLegend(lgd, germ_layer_lgd)
+
+get_heat_map = function(correlation_matrix, row_germ_layer, col_germ_layer, color_scale, g_name, show_rows){
+  row_index = rownames(correlation_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == row_germ_layer]
+  col_index = colnames(correlation_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == col_germ_layer]
+  
+  temp_corr = correlation_matrix[row_index, col_index]
+  g = Heatmap(temp_corr, name=g_name, border = TRUE, show_row_dend = FALSE, show_column_dend = FALSE, show_column_names = FALSE, show_row_names = show_rows,
+              show_heatmap_legend = FALSE,
+                      col = color_scale, use_raster = TRUE,
+                      clustering_distance_rows = "pearson", clustering_distance_columns = "pearson",
+                      clustering_method_rows = "ward.D",clustering_method_columns = "ward.D",
+                      row_names_gp = gpar(fontsize=8), na_col = 'black')  
+  return(g)
+}
+
+ecto_ecto = get_heat_map(temp_corr_matrix, 'Ectoderm', 'Ectoderm', col_fun_2, 'ecto_ecto', TRUE)
+ComplexHeatmap::draw(ecto_ecto)
+meso_meso = get_heat_map(temp_corr_matrix, 'Mesoderm', 'Mesoderm', col_fun_2, 'meso_meso', TRUE)
+ComplexHeatmap::draw(meso_meso)
+endo_endo = get_heat_map(temp_corr_matrix, 'Endoderm', 'Endoderm', col_fun_2, 'endo_endo', TRUE)
+ComplexHeatmap::draw(endo_endo)
+
+
+#Need to ensure the ordering of tissues matches that from the same-to-same clustering
+
+#Subest for ecto and meso tissues
+row_index = rownames(temp_corr_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == 'Ectoderm']
+col_index = colnames(temp_corr_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == 'Mesoderm']
+temp_corr = temp_corr_matrix[row_index, col_index]
+
+#Reorder to match the clustered orders of the same-to-same gerrm layer clustering
+row_index = row_order(ecto_ecto)
+col_index = column_order(meso_meso)
+temp_corr = temp_corr[row_index, col_index]
+
+#Get the heatmap without clustering
+ecto_meso = Heatmap(temp_corr, name='ecto_meso', border = TRUE, show_row_dend = FALSE, show_column_dend = FALSE, show_column_names = FALSE, show_row_names = TRUE, 
+                    show_heatmap_legend = FALSE,
+                    cluster_rows = FALSE, cluster_columns = FALSE,
+                    col = col_fun_2, use_raster = TRUE,
+                    row_names_gp = gpar(fontsize=8), na_col = 'black') 
+ComplexHeatmap::draw(ecto_meso)
+
+
+#Subest for ecto and endo tissues
+row_index = rownames(temp_corr_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == 'Ectoderm']
+col_index = colnames(temp_corr_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == 'Endoderm']
+temp_corr = temp_corr_matrix[row_index, col_index]
+
+#Reorder to match the clustered orders of the same-to-same gerrm layer clustering
+row_index = row_order(ecto_ecto)
+col_index = column_order(endo_endo)
+temp_corr = temp_corr[row_index, col_index]
+
+#Get the heatmap without clustering
+ecto_endo = Heatmap(temp_corr, name='ecto_endo', border = TRUE, show_row_dend = FALSE, show_column_dend = FALSE, show_column_names = FALSE, show_row_names = TRUE, 
+                    show_heatmap_legend = FALSE,
+                    cluster_rows = FALSE, cluster_columns = FALSE,
+                    col = col_fun_2, use_raster = TRUE,
+                    row_names_gp = gpar(fontsize=8), na_col = 'black') 
+ComplexHeatmap::draw(ecto_endo )
+
+#Subest for meso and endo tissues
+row_index = rownames(temp_corr_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == 'Mesoderm']
+col_index = colnames(temp_corr_matrix) %in% germ_layer_df$tissues[germ_layer_df$germ_layers == 'Endoderm']
+temp_corr = temp_corr_matrix[row_index, col_index]
+
+#Reorder to match the clustered orders of the same-to-same gerrm layer clustering
+row_index = row_order(meso_meso)
+col_index = column_order(endo_endo)
+temp_corr = temp_corr[row_index, col_index]
+
+#Get the heatmap without clustering
+meso_endo = Heatmap(temp_corr, name='ecto_endo', border = TRUE, show_row_dend = FALSE, show_column_dend = FALSE, show_column_names = FALSE, show_row_names = TRUE,
+                    show_heatmap_legend = FALSE,
+                    cluster_rows = FALSE, cluster_columns = FALSE,
+                    col = col_fun_2, use_raster = TRUE,
+                    row_names_gp = gpar(fontsize=8), na_col = 'black') 
+ComplexHeatmap::draw(meso_endo)
+
+ComplexHeatmap::draw(ecto_ecto)
+
+ComplexHeatmap::draw(ecto_meso)
+
+ComplexHeatmap::draw(ecto_endo)
+
+ComplexHeatmap::draw(meso_meso)
+
+ComplexHeatmap::draw(meso_endo)
+
+ComplexHeatmap::draw(endo_endo)
+
+grid.rect()
+ComplexHeatmap::draw(legend_list, just = c('left', 'bottom'))
+
+
+```
+
+
+
+############################################
+Figure 4 panel c
+##########################################
+
+
+
+Only show the significant correlations
+Plot the distribution of correlations for tissues across germ layers
+```{r}
+
+temp_corr_matrix = tiss_tiss_correlation_matrix
+temp_corr_matrix[non_sig_corrs_index] = NA
+index = tiss_tiss_donors_df < 20
+temp_corr_matrix[index] = NA
+
+temp_corr_matrix = temp_corr_matrix[!rownames(temp_corr_matrix) %in% exclude,!colnames(temp_corr_matrix) %in% exclude ]
+
+
+
+germ_layers = vector(mode='character', length=length(rownames(temp_corr_matrix)))
+for( i in 1:length(rownames(temp_corr_matrix))){
+  index = which(skew_and_stats_df$tissue == rownames(temp_corr_matrix)[i])
+  germ_layers[i]= as.character(skew_and_stats_df$germ_layer[index[1]])
+}
+
+meso_to_ecto = c(temp_corr_matrix[germ_layers == 'Mesoderm', germ_layers == 'Ectoderm'])
+meso_to_endo = c(temp_corr_matrix[germ_layers == 'Mesoderm', germ_layers == 'Endoderm'])
+endo_to_ecto = c(temp_corr_matrix[germ_layers == 'Endoderm', germ_layers == 'Ectoderm'])
+
+index = upper.tri(temp_corr_matrix[germ_layers == 'Endoderm', germ_layers == 'Endoderm'], diag = FALSE)
+endo_to_endo = temp_corr_matrix[germ_layers == 'Endoderm', germ_layers == 'Endoderm'][index]
+
+index = upper.tri(temp_corr_matrix[germ_layers == 'Ectoderm', germ_layers == 'Ectoderm'], diag = FALSE)
+ecto_to_ecto = temp_corr_matrix[germ_layers == 'Ectoderm', germ_layers == 'Ectoderm'][index]
+
+index = upper.tri(temp_corr_matrix[germ_layers == 'Mesoderm', germ_layers == 'Mesoderm'], diag = FALSE)
+meso_to_meso = temp_corr_matrix[germ_layers == 'Mesoderm', germ_layers == 'Mesoderm'][index]
+
+
+labels = c(rep('Mesoderm--Ectoderm', length(meso_to_ecto)), rep('Mesoderm--Endoderm', length(meso_to_endo)), rep('Endoderm--Ectoderm', length(endo_to_ecto)), 
+           rep('Mesoderm--Mesoderm', length(meso_to_meso)), rep('Ectoderm--Ectoderm', length(ecto_to_ecto)), rep('Endoderm--Endoderm', length(endo_to_endo)))
+within_across_label = c(rep('Across germ layers', length(c(meso_to_ecto,meso_to_endo,endo_to_ecto))), rep('Within germ layer', length(c(meso_to_meso,ecto_to_ecto,endo_to_endo))) )
+data =c(meso_to_ecto,meso_to_endo, endo_to_ecto ,meso_to_meso,ecto_to_ecto, endo_to_endo)
+
+labels = factor(labels, levels=c('Mesoderm--Ectoderm','Mesoderm--Endoderm','Endoderm--Ectoderm', 'Endoderm--Endoderm', 'Mesoderm--Mesoderm','Ectoderm--Ectoderm'))
+
+temp_df = data.frame(skew_correlations = data, labels = labels, germ_layer_comp =within_across_label  )
+
+
+fill_col = c('#A4A4A4', '#A4A4A4', '#A4A4A4', endo_color, meso_color, ecto_color)
+
+ggplot(temp_df, aes(x=labels, y=skew_correlations)) + geom_violin(color = 'black') + geom_jitter(position=position_jitter(0.1), size = .75) +
+  xlab('Germ layer comparisons') + ylab('Pearson correlations') +
+  ggtitle('Skew is correlated across germ layers') + geom_hline(yintercept = 0, color = 'red', linetype = 'dashed', size = 1) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=12), axis.title.x = element_text(face='bold',size=12),
+        plot.title=element_text(hjust=.5), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.text.y = element_text(size=12, face = 'bold'), axis.title.y = element_text(face='bold',size=12),
+        panel.border = element_rect(colour = "black", fill=NA, size=1), panel.background = element_rect(fill = 'white'),
+        plot.margin = margin(.1, .1, .1, .1, 'in')) +
+  facet_wrap(~germ_layer_comp, scales = 'free_x') 
+
+
+```
+
+```{r}
+
+across_index = temp_df$germ_layer_comp == 'Across germ layers'
+range(temp_df$skew_correlations[across_index], na.rm = T)
+
+within_index = temp_df$germ_layer_comp == 'Within germ layer'
+range(temp_df$skew_correlations[within_index], na.rm = T)
+```

@@ -1,0 +1,748 @@
+
+
+Using EN-TEx data as a phased control for the folded normal model
+
+
+```{r}
+library(ggplot2)
+library(biomaRt)
+library(stringr)
+library(plotrix)
+library(VGAM)
+library(viridis)
+library(ggrepel)
+
+```
+
+
+
+Starting with the allele specific expression data, determining if any of the tissues are skewed for the two donors
+```{r}
+#Phased allele-specific expression from the EN-TEx consortium
+
+dir = 'PATH_TO_DATA'
+files = list.files(dir)
+donor_1 = paste(dir, files[grepl('003', files)], sep='/')
+donor_2 = paste(dir, files[grepl('004', files)], sep='/')
+
+donor_1_data = lapply(donor_1, read.table, sep='\t', header=TRUE)
+donor_2_data = lapply(donor_2, read.table, sep='\t', header=TRUE)
+
+head(donor_1_data)
+head(donor_2_data)
+```
+
+
+
+
+Get a dataframe for the tissues per donor 
+```{r}
+#Get the tissue names
+donor_1_tissues = unname(sapply(sapply(sapply(donor_1, strsplit, split='__'), '[[', 2), str_remove, '_chrX.tsv'))
+donor_2_tissues = unname(sapply(sapply(sapply(donor_2, strsplit, split='__'), '[[', 2), str_remove, '_chrX.tsv'))
+d_1 = rep('donor_1', length(donor_1_tissues))
+d_2 = rep('donor_2', length(donor_2_tissues))
+
+tissues = c(donor_1_tissues, donor_2_tissues)
+id = c(d_1, d_2)
+
+#Put in a dataframe
+meta_tissues = data.frame(tissues = tissues, donor = id)
+meta_tissues
+  
+
+```
+
+
+Filtered data, increasing read depth filter for genes
+```{r}
+read_filt = 10
+
+filt_donor_1_data = donor_1_data
+filt_donor_2_data = donor_2_data
+for(i in 1: length(filt_donor_1_data)){
+  data = filt_donor_1_data[[i]]
+  f_1 = data$hap1_count >= read_filt
+  f_2 = data$hap2_count >= read_filt
+  f = f_1 & f_2
+  
+  filt_donor_1_data[[i]] = data[f, ]
+  
+}
+
+
+for(i in 1: length(filt_donor_2_data)){
+  data = filt_donor_2_data[[i]]
+  f_1 = data$hap1_count >= read_filt
+  f_2 = data$hap2_count >= read_filt
+  f = f_1 & f_2
+  
+  filt_donor_2_data[[i]] = data[f, ]
+  
+}
+
+
+
+```
+
+
+Good idea to filter out the same escape genes I did in the GTEx data
+
+
+```{r}
+tukiainen_escape_meta = read.table(file = '../data/tukiainen_study.txt', header = TRUE, sep = '\t')
+tukiainen_escape_meta = tukiainen_escape_meta[1:683, ] #Random row at the end
+table(tukiainen_escape_meta$Reported.XCI.status)
+
+escape_genes_hgnc = as.character(tukiainen_escape_meta$Gene.name[as.character(tukiainen_escape_meta$Reported.XCI.status) == 'Escape'])
+escape_genes_ensembl = as.character(tukiainen_escape_meta$Gene.ID[as.character(tukiainen_escape_meta$Reported.XCI.status) == 'Escape'])
+
+escape_genes_ensembl = sapply(strsplit(escape_genes_ensembl, '.', fixed = TRUE), '[[', 1)
+```
+
+Filter out the escape genes in each sample
+
+```{r}
+#Save data with the escape
+esc_donor_1_data = donor_1_data
+esc_donor_2_data = donor_2_data
+```
+
+
+```{r}
+
+for( i in 1:length(donor_1_data)){
+  
+  sample_genes = sapply(strsplit(as.character(donor_1_data[[i]]$X), '.', fixed = TRUE), '[[', 1)
+  index = !sample_genes %in% escape_genes_ensembl
+  donor_1_data[[i]] =donor_1_data[[i]][index, ]
+}
+
+for( i in 1:length(filt_donor_1_data)){
+  
+  sample_genes = sapply(strsplit(as.character(filt_donor_1_data[[i]]$X), '.', fixed = TRUE), '[[', 1)
+  index = !sample_genes %in% escape_genes_ensembl
+  filt_donor_1_data[[i]] = filt_donor_1_data[[i]][index, ]
+}
+
+
+
+
+for( i in 1:length(donor_2_data)){
+  
+  sample_genes = sapply(strsplit(as.character(donor_2_data[[i]]$X), '.', fixed = TRUE), '[[', 1)
+  index = !sample_genes %in% escape_genes_ensembl
+  donor_2_data[[i]] =donor_2_data[[i]][index, ]
+}
+
+for( i in 1:length(filt_donor_2_data)){
+  
+  sample_genes = sapply(strsplit(as.character(filt_donor_2_data[[i]]$X), '.', fixed = TRUE), '[[', 1)
+  index = !sample_genes %in% escape_genes_ensembl
+  filt_donor_2_data[[i]] = filt_donor_2_data[[i]][index, ]
+}
+  
+
+```
+
+
+
+And the actual skew distributions
+
+```{r}
+
+for( i in 1: length(donor_1_data)){
+  
+
+  hap_1_skews = donor_1_data[[i]]$hap1_count / (donor_1_data[[i]]$hap1_count + donor_1_data[[i]]$hap2_count)
+  hap_2_skews = donor_1_data[[i]]$hap2_count / (donor_1_data[[i]]$hap1_count + donor_1_data[[i]]$hap2_count)
+  hap_1_mean = mean(hap_1_skews)
+  hap_2_mean = mean(hap_2_skews)
+
+  
+  title = sprintf('Donor 1 Haplotype skews %s', as.character(meta_tissues$tissues[meta_tissues$donor == 'donor_1'])[i]) 
+  #Dark grey is haplotype 1
+  hist(hap_1_skews, main=title, col = rgb(0.1,0.1,0.1,0.5), xlim = c(0,1), xlab = ('Haplotype counts / Total'))
+  hist(hap_2_skews, col=rgb(0.8,0.8,0.8,0.5), add=T )
+  legend("topright", c("Hap1", "Hap2"), col=c(rgb(0.1,0.1,0.1,0.5), rgb(0.8,0.8,0.8,0.5)), lwd=10)
+  
+  
+  hap_1_skews = filt_donor_1_data[[i]]$hap1_count / (filt_donor_1_data[[i]]$hap1_count + filt_donor_1_data[[i]]$hap2_count)
+  hap_2_skews = filt_donor_1_data[[i]]$hap2_count / (filt_donor_1_data[[i]]$hap1_count + filt_donor_1_data[[i]]$hap2_count)
+  hap_1_mean = mean(hap_1_skews)
+  hap_2_mean = mean(hap_2_skews)
+  
+  
+  title = sprintf('Donor 1 Haplotype filt skews %s', as.character(meta_tissues$tissues[meta_tissues$donor == 'donor_1'])[i]) 
+  #Dark grey is haplotype 1
+  hist(hap_1_skews, main=title, col = rgb(0.1,0.1,0.1,0.5), xlim = c(0,1), xlab = ('Haplotype counts / Total'))
+  hist(hap_2_skews, col=rgb(0.8,0.8,0.8,0.5), add=T )
+  legend("topright", c("Hap1", "Hap2"), col=c(rgb(0.1,0.1,0.1,0.5), rgb(0.8,0.8,0.8,0.5)), lwd=10)
+
+  
+}
+
+```
+
+
+```{r}
+
+for( i in 1: length(donor_2_data)){
+  
+
+  hap_1_skews = donor_2_data[[i]]$hap1_count / (donor_2_data[[i]]$hap1_count + donor_2_data[[i]]$hap2_count)
+  hap_2_skews = donor_2_data[[i]]$hap2_count / (donor_2_data[[i]]$hap1_count + donor_2_data[[i]]$hap2_count)
+  hap_1_mean = mean(hap_1_skews)
+  hap_2_mean = mean(hap_2_skews)
+
+  
+  title = sprintf('Donor 2 Haplotype skews %s', as.character(meta_tissues$tissues[meta_tissues$donor == 'donor_2'])[i]) 
+  #Dark grey is haplotype 1
+  hist(hap_2_skews, main=title, col=rgb(0.8,0.8,0.8,0.5), xlim = c(0,1), xlab = ('Haplotype counts / Total'))
+  hist(hap_1_skews, col = rgb(0.1,0.1,0.1,0.5), add=T )
+  legend("topright", c("Hap1", "Hap2"), col=c(rgb(0.1,0.1,0.1,0.5), rgb(0.8,0.8,0.8,0.5)), lwd=10)
+  
+  
+  hap_1_skews = filt_donor_2_data[[i]]$hap1_count / (filt_donor_2_data[[i]]$hap1_count + filt_donor_2_data[[i]]$hap2_count)
+  hap_2_skews = filt_donor_2_data[[i]]$hap2_count / (filt_donor_2_data[[i]]$hap1_count + filt_donor_2_data[[i]]$hap2_count)
+  hap_1_mean = mean(hap_1_skews)
+  hap_2_mean = mean(hap_2_skews)
+  
+  
+  title = sprintf('Donor 2 Haplotype filt skews %s', as.character(meta_tissues$tissues[meta_tissues$donor == 'donor_2'])[i]) 
+  #Dark grey is haplotype 1
+  hist(hap_1_skews, main=title, col = rgb(0.1,0.1,0.1,0.5), xlim = c(0,1), xlab = ('Haplotype counts / Total'))
+  hist(hap_2_skews, col=rgb(0.8,0.8,0.8,0.5), add=T )
+  legend("topright", c("Hap1", "Hap2"), col=c(rgb(0.1,0.1,0.1,0.5), rgb(0.8,0.8,0.8,0.5)), lwd=10)
+
+}
+
+```
+
+
+
+
+
+Just getting the median of the haplotype distributions, seems to be a better estimate than the binomial likelihood function for the more skewed samples
+```{r}
+
+#Donor_data is the list of each tissue's dataframe containing haplotype read counts
+
+get_skew_estimate_median = function(donor_data){
+
+  skew = list()
+
+  for(i in 1:length(donor_data)){
+  
+  hap_1 = donor_data[[i]]$hap1_count
+  hap_2 = donor_data[[i]]$hap2_count
+  total = hap_1 + hap_2
+  
+  hap_1_skews = hap_1 / total
+  hap_2_skews = hap_2 / total
+  
+  hap_1_est = median(hap_1_skews)
+  hap_2_est = median(hap_2_skews)
+  
+  skew[[i]] = c(hap_1_est, hap_2_est)
+  }
+  return(skew)
+}
+```
+
+```{r}
+skews_donor_1 = get_skew_estimate_median(donor_1_data)
+names(skews_donor_1) = donor_1_tissues
+skews_donor_2 = get_skew_estimate_median(donor_2_data)
+names(skews_donor_2) = donor_2_tissues
+```
+
+
+
+
+Get plots showing the direction of skew per tissue for both donors
+Making the point that most tissues are skewed in the same direction
+For each tissue, take the haplotype with the dominant skew and plot per donor
+Donor 1 dominant hap is 2, Donor 1 dominant skew is  hap 1
+
+
+#################################
+Supplemental figure 7 panel e
+#################################
+
+
+```{r}
+donor_1_hap2_skews = unlist(lapply(skews_donor_1, '[[', 2 ))
+donor_1_tissues = names(donor_1_hap2_skews)
+donor_2_hap1_skews = unlist(lapply(skews_donor_2, '[[', 1 ))
+donor_2_tissues = names(donor_2_hap1_skews)
+donor_1_labels = rep('Donor 1', length(donor_1_hap2_skews))
+donor_2_labels = rep('Donor 2', length(donor_2_hap1_skews))
+
+donor_dom_skew_df = data.frame(skews = c(donor_1_hap2_skews, donor_2_hap1_skews), labels = c(donor_1_labels, donor_2_labels), tissues = c(donor_1_tissues, donor_2_tissues))
+switch_plotting = donor_dom_skew_df[donor_dom_skew_df$skews<.5,  ]  
+
+
+ggplot(donor_dom_skew_df, aes(x = labels, y = skews)) + geom_violin() + 
+  geom_dotplot(binaxis='y', stackdir='center', dotsize=.75) + geom_hline( yintercept = .5, color = 'red', linetype = 'dashed') +
+  annotate("text", x = 1.5, y = .95, label = 'Skewed in the same direction', size = 4) +
+  annotate("text", x = 1.5, y = .05, label = 'Skewed in the opposite direction', size = 4) +
+  geom_label_repel(data = switch_plotting, aes(label = tissues), size = 2, box.padding = .75, ylim = c(0, .5)) +
+  ylab('Tissue skews from the same haplotype') + ylim(0, 1) +
+  ggtitle('ENTEx: phased data') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1),
+        plot.title = element_text(hjust = .5, size = 16),
+        axis.text.x = element_text(size = 12), axis.title.x = element_blank(), 
+        axis.text.y = element_text(size = 12), axis.title.y = element_text(size = 12), 
+        panel.background = element_rect(fill = 'white'))
+
+
+```
+
+
+Testing the folded normal skew estimation using this phased data
+Method:
+  -For a tissue, the choice of hap1 or hap2 will be a bernoulli trial for each gene with probability equal to .5
+  -Each gene will have equal probability to have it's hap1 or hap2 counts to be counted as the pseudo-reference counts
+  -This will jummble the hap1 and hap2 counts together for the pseudo-reference counts
+  -Doing it with the bernoulli trials I can also bootstrap the results
+  -Once I have a pseudo reference count, get the skews (ref/total), fold them, and run the folded normal skew estimate method
+  -Bootstrap it at the bernoulli sampling stage
+  -Compare to the skew estimate derived from the actual phased data
+  
+```{r}
+
+
+# Functions to fold and unfold ratios 
+folded <- function(x) { apply( cbind(x,1-x), 1, max)} 
+unfold <- function(x) { c(x,1-x) } 
+
+#Sara's MLE function
+# Maximum likelihood estimate function. Note, x is a global variable! Should fix but this lets me use it in the bootstrap later.  
+mle_folded <- function(x, percentile= NULL){ 
+  mus = seq(0.5,1, by = 0.001)
+  sigmas = seq(0,0.5, by = 0.01)
+  
+  if(is.null(percentile)){
+    mles = sapply(mus, function(mu) sapply(sigmas, function(sigma) -sum( log(dnorm( x,   mean = mu, sd = sigma ) + dnorm( x,   mean = 1-mu, sd = sigma ) )  )))
+  }else{
+    index = which(x >= quantile(x, percentile))
+    mles = sapply(mus, function(mu) sapply(sigmas, function(sigma) -sum( log(dnorm( x,   mean = mu, sd = sigma ) + dnorm( x,   mean = 1-mu, sd = sigma ) )[index]  )))
+  }
+  
+  
+  mles[!is.finite(mles)] = NA
+  coefs = which(mles==min(mles, na.rm=T), arr.ind=T)
+  return (list( mus[coefs[2]] , sigmas[coefs[1]]))
+} 
+
+
+boot_skew = function(data, indices){
+  
+  x = data[indices]           #For the bootstrap sampling
+  x = folded(x)               #Fold for the MLE
+  params = mle_folded(x)       #MLE the folded norm
+  return(c(params[[1]], params[[2]]))
+}
+
+
+
+get_boot_mu = function(boot){
+  if(length(boot)==1){   #If the bootstrap had an NA, length of the object is 1
+    return(NA)
+  }else{return(boot$t0[1])}
+}
+get_boot_sig = function(boot){
+  if(length(boot)==1){   #If the bootstrap had an NA, length of the object is 1
+    return(NA)
+  }else{return(boot$t0[2])}
+}
+
+
+get_CI = function(boot){
+  if(length(boot)==1){
+    return(c(NA,NA))
+  }else{
+    mu_distribution = boot$t[ ,1]
+    mu_distribution = sort(mu_distribution)
+    
+    #For 200 bootstraps, 2.5% of the distribution is below the 6th index, 2.5% is above the 195th index
+    lower_CI = mu_distribution[6]
+    upper_CI = mu_distribution[195]
+    return(c(lower_CI, upper_CI))
+  }
+}
+
+```
+  
+
+```{r}
+  
+folded_mle_method = function(donor_data){
+
+  df = data.frame(mle_est_skew = vector(mode='numeric', length = length(donor_data)), mle_est_sigma =  vector(mode='numeric', length = length(donor_data)))
+  
+  for(i in 1:length(donor_data)){
+  
+    data = donor_data[[i]]                                     #Grab the data for the tissue
+    num_genes = dim(data)[1]
+    total_counts = data$hap1_count + data$hap2_count
+    pseudo_ref = vector(mode='numeric', length = num_genes)
+    
+    bern_trials = as.logical(rbinom(num_genes,1, .5))         #Get a sample of the hap1_counts
+    pseudo_ref[bern_trials] = data$hap1_count[bern_trials]
+    
+    bern_trials = !bern_trials                               #Get the corresponding hap_2_counts
+    pseudo_ref[bern_trials] = data$hap2_count[bern_trials]
+    
+    pseudo_ref_skews = pseudo_ref / total_counts             #Get the skews and pass them to the bootstrapping method
+    
+    
+    mle_results = mle_folded(folded(pseudo_ref_skews))
+    
+    df$mle_est_skew[i] = mle_results[[1]]
+    df$mle_est_sigma[i] = mle_results[[2]]
+    
+  }
+  return(df)
+  
+}
+
+```
+
+See if random sampling the haplotypes versus just folding one of the haplotypes makes any difference for the skews
+No, it doesnt matter, don'tt need to do the bernoulli trial thing cause it's the same as just using one haplotype and folding it
+But conceptually, doing the bernoulli trials is truly like jumbling up the haplotypes, just do it that way
+```{r}
+
+
+data = donor_1_data[[1]]                                     #Grab the data for the tissue
+num_genes = dim(data)[1]
+total_counts = data$hap1_count + data$hap2_count
+pseudo_ref = vector(mode='numeric', length = num_genes)
+
+bern_trials = as.logical(rbinom(num_genes,1, .5))         #Get a sample of the hap1_counts
+pseudo_ref[bern_trials] = data$hap1_count[bern_trials]
+
+bern_trials = !bern_trials                               #Get the corresponding hap_2_counts
+pseudo_ref[bern_trials] = data$hap2_count[bern_trials]
+
+pseudo_ref_skews = pseudo_ref / total_counts 
+hist(pseudo_ref_skews, breaks = 64)
+mle_results = mle_folded(folded(pseudo_ref_skews))
+
+mle_results[[1]]
+mle_results[[2]]  
+
+
+hap_1_skews = data$hap1_count / total_counts
+mle_results = mle_folded(folded(hap_1_skews))
+
+mle_results[[1]]
+mle_results[[2]] 
+
+hap_2_skews = data$hap2_count / total_counts
+mle_results = mle_folded(folded(hap_2_skews))
+
+mle_results[[1]]
+mle_results[[2]] 
+
+
+
+
+
+```
+
+
+```{r}
+both_donors = c(donor_1_data, donor_2_data)
+esc_both_donors = c(esc_donor_1_data, esc_donor_2_data)
+filt_both_donors = c(filt_donor_1_data, filt_donor_2_data)
+
+```
+
+
+```{r}
+full_mle_skew_estimates = vector(mode = 'numeric', length = length(both_donors))
+full_mle_skew_var = vector(mode = 'numeric', length = length(both_donors))
+tissue_mean_expression = vector(mode = 'numeric', length = length(both_donors))
+tissue_median_expression = vector(mode = 'numeric', length = length(both_donors))
+tissue_sd_expression = vector(mode = 'numeric', length = length(both_donors))
+mean_skew_estimates = vector(mode = 'numeric', length = length(both_donors))
+median_skew_estimates = vector(mode = 'numeric', length = length(both_donors))
+median_skew_estimates_no_xist = vector(mode = 'numeric', length = length(both_donors))
+f_var_phased_gene_skews = vector(mode = 'numeric', length = length(both_donors))
+var_phased_gene_skews = vector(mode = 'numeric', length = length(both_donors))
+num_genes_full = vector(mode = 'numeric', length = length(both_donors))
+for(i in 1:length(both_donors)){
+  
+  data = both_donors[[i]]
+  hap_1_skews = data$hap1_count / (data$hap1_count + data$hap2_count)
+  f_hap_1_skews = folded(hap_1_skews)
+  #Grab the variance in the phased gene skews
+  f_var_phased_gene_skews[i] = var(f_hap_1_skews)
+  var_phased_gene_skews[i] = var(hap_1_skews)
+  #Mean and median of the true haplotype skews
+  mean_skew_estimates[i] = folded(mean(hap_1_skews))
+  median_skew_estimates[i] = folded(median(hap_1_skews))
+  
+  #Mean and sd of total gene expression
+  gene_expression = data$hap1_count + data$hap2_count
+  tissue_median_expression[i] = median(gene_expression)
+  tissue_mean_expression[i] = mean(gene_expression)
+  tissue_sd_expression[i] = sd(gene_expression)
+  num_genes_full[i] = length(gene_expression)
+  
+  
+  #Do it without XIST
+  temp_data = data[as.character(data$X) != 'ENSG00000229807.9', ]
+  temp_hap_1_skews = temp_data$hap1_count / (temp_data$hap1_count + temp_data$hap2_count)
+  median_skew_estimates_no_xist[i] = folded(median(temp_hap_1_skews))
+  
+  #MLE estimate with the entire distribution
+  num_genes = dim(data)[1]
+  total_counts = data$hap1_count + data$hap2_count
+  pseudo_ref = vector(mode='numeric', length = num_genes)
+  
+  bern_trials = as.logical(rbinom(num_genes,1, .5))         #Get a sample of the hap1_counts
+  pseudo_ref[bern_trials] = data$hap1_count[bern_trials]
+  
+  bern_trials = !bern_trials                               #Get the corresponding hap_2_counts
+  pseudo_ref[bern_trials] = data$hap2_count[bern_trials]
+  pseudo_ref_skews = pseudo_ref / total_counts 
+  
+  full_estimate = mle_folded(folded(pseudo_ref_skews))
+  full_mle_skew_estimates[i] = full_estimate[1]
+  full_mle_skew_var[i] = full_estimate[2]
+}
+
+
+#Now with the increased read depth filter
+
+filt_full_mle_skew_estimates = vector(mode = 'numeric', length = length(filt_both_donors))
+filt_full_mle_skew_var = vector(mode = 'numeric', length = length(filt_both_donors))
+filt_mean_skew_estimates = vector(mode = 'numeric', length = length(filt_both_donors))
+filt_median_skew_estimates = vector(mode = 'numeric', length = length(filt_both_donors))
+filt_median_gene_expression = vector(mode = 'numeric', length = length(filt_both_donors))
+num_genes_filt = vector(mode = 'numeric', length = length(filt_both_donors))
+for(i in 1:length(filt_both_donors)){
+  
+  data = filt_both_donors[[i]]
+  hap_1_skews = data$hap1_count / (data$hap1_count + data$hap2_count)
+  f_hap_1_skews = folded(hap_1_skews)
+  
+  #Mean and median of the true haplotype skews
+  filt_mean_skew_estimates[i] = folded(mean(hap_1_skews))
+  filt_median_skew_estimates[i] = folded(median(hap_1_skews))
+  
+  #Mean and sd of total gene expression
+  gene_expression = data$hap1_count + data$hap2_count
+  filt_median_gene_expression[i] = median(gene_expression)
+  num_genes_filt[i] = length(gene_expression)
+  #MLE estimate with the entire distribution
+  num_genes = dim(data)[1]
+  total_counts = data$hap1_count + data$hap2_count
+  pseudo_ref = vector(mode='numeric', length = num_genes)
+  
+  bern_trials = as.logical(rbinom(num_genes,1, .5))         #Get a sample of the hap1_counts
+  pseudo_ref[bern_trials] = data$hap1_count[bern_trials]
+  
+  bern_trials = !bern_trials                               #Get the corresponding hap_2_counts
+  pseudo_ref[bern_trials] = data$hap2_count[bern_trials]
+  pseudo_ref_skews = pseudo_ref / total_counts 
+  
+  full_estimate = mle_folded(folded(pseudo_ref_skews))
+  filt_full_mle_skew_estimates[i] = full_estimate[1]
+  filt_full_mle_skew_var[i] = full_estimate[2]
+
+}
+
+
+```
+
+```{r}
+esc_mle_skew_estimates = vector(mode = 'numeric', length = length(esc_both_donors))
+esc_mle_skew_var = vector(mode = 'numeric', length = length(esc_both_donors))
+
+for(i in 1:length(esc_both_donors)){
+  
+  data = esc_both_donors[[i]]
+  
+  #MLE estimate with the entire distribution
+  num_genes = dim(data)[1]
+  total_counts = data$hap1_count + data$hap2_count
+  pseudo_ref = vector(mode='numeric', length = num_genes)
+  
+  bern_trials = as.logical(rbinom(num_genes,1, .5))         #Get a sample of the hap1_counts
+  pseudo_ref[bern_trials] = data$hap1_count[bern_trials]
+  
+  bern_trials = !bern_trials                               #Get the corresponding hap_2_counts
+  pseudo_ref[bern_trials] = data$hap2_count[bern_trials]
+  pseudo_ref_skews = pseudo_ref / total_counts 
+  
+  full_estimate = mle_folded(folded(pseudo_ref_skews))
+  esc_mle_skew_estimates[i] = full_estimate[1]
+  esc_mle_skew_var[i] = full_estimate[2]
+}
+
+
+
+```
+
+
+
+
+```{r}
+
+par(pty='s')
+plot(round(median_skew_estimates, digits=3), unlist(full_mle_skew_estimates), ylim = c(.5, 1), xlim = c(.5, 1), main = 'EnTEX both donors: phased skew vs MLE-folded normal estimate',
+     xlab = 'Median skew of phased gene counts', ylab = 'MLE-folded normal estimated skew')
+abline(a = 0, b = 1, col='red')
+
+
+```
+
+#############################
+Figure 2 panel c
+############################
+
+
+
+```{r}
+entex_phased_vs_unphased_df = data.frame(median_skews = round(median_skew_estimates, digits=3), filt_median_skews = filt_median_skew_estimates,
+                                         mle_skew_estimates =  unlist(full_mle_skew_estimates),
+                                         filt_exp_mle_skew_estimates = unlist(filt_full_mle_skew_estimates),
+                                         mle_skew_variance = unlist(full_mle_skew_var),
+                                         filt_mle_skew_variance = unlist(filt_full_mle_skew_var),
+                                         escape_mle_skew = unlist(esc_mle_skew_estimates),
+                                         escape_mle_var = unlist(esc_mle_skew_var),
+                                         filt_median_gene_expression = filt_median_gene_expression,
+                                         median_gene_expression = tissue_median_expression,
+                                         mean_gene_expression = tissue_mean_expression,
+                                         sd_gene_expression = tissue_sd_expression,
+                                         num_genes_full = num_genes_full,
+                                         num_genes_filt = num_genes_filt,
+                                         unfolded_phased_skew_var = var_phased_gene_skews,
+                                         tissue = c(donor_1_tissues, donor_2_tissues),
+                                         donor_label = c(rep('donor_1', length(donor_1_tissues)), rep('donor_2', length(donor_2_tissues))), 
+                                         sample_id = c(1:length(donor_1_tissues), 1:length(donor_2_tissues)))
+
+ggplot(entex_phased_vs_unphased_df, 
+       aes(x = median_skews, y = mle_skew_estimates)) + geom_point(size = 3, alpha = .5) + 
+  ggtitle('Unfiltered') + geom_segment(aes(x = .5, xend = 1, y = .5, yend = 1), col = 'red') +
+  ylab('Estimated skew from unphased data') + xlab('Skew from phased data') + xlim(.5,1) + ylim(.5,1) + 
+  coord_fixed() +
+  theme(plot.title=element_text(hjust=.5, size=15), axis.text=element_text(size=12),axis.title=element_text(size=12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        panel.background = element_rect(fill = 'white'))
+
+
+ggplot(entex_phased_vs_unphased_df, 
+       aes(x = filt_median_skews, y = filt_exp_mle_skew_estimates)) + geom_point(size = 3, alpha = .5) + 
+  ggtitle('>= 10 reads per allele') + 
+  ylab('Estimated skew from unphased data') + xlab('Skew from phased data') + xlim(.5,1) + ylim(.5,1) + 
+  geom_segment(aes(x = .5, xend = 1, y = .5, yend = 1), col = 'red') +
+  coord_fixed() +
+  theme(plot.title=element_text(hjust=.5, size=15), axis.text=element_text(size=12),axis.title=element_text(size=12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        panel.background = element_rect(fill = 'white'))
+
+ggplot(entex_phased_vs_unphased_df, 
+       aes(x = median_skews, y = escape_mle_skew)) + geom_point(size = 3, alpha = .5) + 
+  ggtitle('with escape genes') + 
+  ylab('Estimated skew from unphased data with escape') + xlab('Skew from phased data without escape') +
+  geom_segment(aes(x = .5, xend = 1, y = .5, yend = 1), col = 'red') +
+  ylim(.5,1) + xlim(.5,1)+
+  coord_fixed() +
+  theme(plot.title=element_text(hjust=.5, size=15), axis.text=element_text(size=12),axis.title=element_text(size=12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        panel.background = element_rect(fill = 'white'))
+
+
+```
+
+
+
+
+Looking at the model error when including and excluding escape genes
+#############################
+Figure 2 panel d
+############################
+
+```{r}
+entex_phased_vs_unphased_df$skew_dev = abs(entex_phased_vs_unphased_df$median_skews - entex_phased_vs_unphased_df$mle_skew_estimates)
+entex_phased_vs_unphased_df = entex_phased_vs_unphased_df[order(entex_phased_vs_unphased_df$skew_dev,decreasing = T), ]
+
+entex_phased_vs_unphased_df$filt_skew_dev = abs(entex_phased_vs_unphased_df$filt_median_skews - entex_phased_vs_unphased_df$filt_exp_mle_skew_estimates)
+
+entex_phased_vs_unphased_df$escape_skew_dev = abs(entex_phased_vs_unphased_df$median_skews - entex_phased_vs_unphased_df$escape_mle_skew)
+```
+
+
+```{r}
+
+model_error = c((entex_phased_vs_unphased_df$mle_skew_estimates - entex_phased_vs_unphased_df$median_skews), 
+                (entex_phased_vs_unphased_df$escape_mle_skew - entex_phased_vs_unphased_df$median_skews))
+label = c(rep('Without known escape genes', length(entex_phased_vs_unphased_df$skew_dev)), rep('With known escape genes', length(entex_phased_vs_unphased_df$escape_skew_dev)) )
+
+skew_dev_df = data.frame(model_error = model_error, escape_label = label)
+skew_dev_df$escape_label = factor(skew_dev_df$escape_label, levels = c('Without known escape genes','With known escape genes'))
+
+ggplot(skew_dev_df, aes(x = escape_label, y = model_error)) + geom_boxplot(outlier.shape = NA) + geom_jitter(size = 2, alpha = .5) +
+  geom_hline(yintercept = 0, color = 'red') +
+  ylab('Folded normal skew estimate deviation from phased skew') +
+  theme(plot.title=element_text(hjust=.5, size=15), axis.text=element_text(size=12),axis.title=element_text(size=12),
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=1), 
+      panel.background = element_rect(fill = 'white'))
+
+
+
+```
+#############################
+Figure 2 panel e
+############################
+
+```{r}
+agg_inactive_ratios = c()
+agg_escape_ratios = c()
+skew_thresh = .7
+sample_index = entex_phased_vs_unphased_df$sample_id[entex_phased_vs_unphased_df$median_skews >= skew_thresh]
+
+for(i in sample_index){
+  
+  temp = esc_both_donors[[i]]
+  
+  genes = unlist(lapply(strsplit(temp$X, split = '.', fixed = T), '[[', 1))
+  folded_ratios = folded(temp$hap1_count / (temp$hap1_count + temp$hap2_count))
+  escape_ratios = folded_ratios[genes %in% escape_genes_ensembl]
+  inactive_ratios = folded_ratios[!genes %in% escape_genes_ensembl]
+  
+  agg_inactive_ratios = c(agg_inactive_ratios, inactive_ratios )
+  agg_escape_ratios = c(agg_escape_ratios, escape_ratios)
+  
+}
+
+par(pty = 's')
+hist(agg_escape_ratios, breaks = seq(.5,1,.025), freq = F, col = 'red')
+hist(agg_inactive_ratios, breaks = seq(.5,1,.025), freq = F, add = T)
+
+
+agg_esc_labels = c(rep('Escape genes', length = length(agg_escape_ratios)), rep('Inactive genes', length = length(agg_inactive_ratios)))
+agg_escape_df = data.frame(skews = c(agg_escape_ratios, agg_inactive_ratios), label = agg_esc_labels)
+
+ggplot(agg_escape_df, aes(x = skews, fill = label)) + geom_histogram(binwidth = .025, alpha = .75, position = 'identity', color = 'black', aes(y = ..density..)) +
+  scale_fill_manual(values = c('red','grey')) +
+  scale_x_continuous(limits = c(.485, 1.015)) +
+  theme(plot.title=element_text(hjust=.5, size=15), axis.text=element_text(size=12),axis.title=element_text(size=12),
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+    panel.border = element_rect(colour = "black", fill=NA, size=1), 
+    panel.background = element_rect(fill = 'white'))
+
+```
+
+
