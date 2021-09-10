@@ -4,6 +4,8 @@ This repository contains code for the manuscript "Cross-tissue analysis of allel
 All relevant data generated from these notebooks are available on the FTP server: http://labshare.cshl.edu/shares/gillislab/people/werner/xskew2021_preprint/data
 To fully replicate all analysis, you first need access to and download the .fastq data from GTEx, which requires dbGAP permissions. Once you have the fastqs, the VCF and WIG files used as input for estimating XCI ratios can be generated following the snakemake pipeline in human_cross_tissue_XCI/code/snakemake_data_processing_pipeline
 
+The snakemake pipeline was used to process the newly added v8 GTEx samples, using the same tools/parameters as used for processing v7 data but also including steps to re-align the v8 data to the genome version used in the v7 analysis.
+
 Notebooks, 1, 2, and 3 should be run in that order, order does not matter for 4,5, 6, and 7.
 
 1.)GTEx_SNP_gene_filtering_XCI_ratio_estimates.Rmd
