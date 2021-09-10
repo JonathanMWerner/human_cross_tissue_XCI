@@ -1,1 +1,7 @@
 /data
+
+/code/snakemake_data_processing_pipeline/Snakefile.v2
+/code/snakemake_data_processing_pipeline/Snakefile.v4
+/code/snakemake_data_processing_pipeline/Snakefile.wasp.v1
+
+
