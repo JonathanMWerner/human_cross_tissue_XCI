@@ -368,12 +368,6 @@ load('../data/sample_metadata_with_v8.Rdata')
 
 ```{r}
 
-#load("/home/werner/xchrom_snp_skew/data/GTEx/snp_skews/GTEx_skew_fixed_SNP_filt.Rdata")
-# GENCODE id conversion file. Contains the 'attr' variable.'
-#THESE ARE ANNOTATIONS FOR GRCH37!!!!!!!!!!! Everything was aligned to GRCH38 plus the dbSNP annotation version we're using is for GRCh38.p7
-#load("/data/genomes/human/gene_annotations_v19.Rdata")
-
-#Version 25 is the right annotation file, we might have been filtering away a lot of SNPs by using the wrong annotations
 load("../data/gene_annotations_v25.Rdata")
 head(attr)
 

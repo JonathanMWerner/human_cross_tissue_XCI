@@ -526,61 +526,145 @@ test_inactive_gene_stats
 ```
 
 
-```{r}
-filt_test_inactive = c()
-for(i in 1:length(test_genes)){
-  gene = test_genes[i]
-  temp_df = test_inactive_gene_stats[test_inactive_gene_stats$gene == gene, ]
-  if(sum(temp_df$num_conf_genes >= 30) < 30){next} 
-  filt_test_inactive = c(filt_test_inactive, gene)
-  temp_df = temp_df[temp_df$num_conf_genes>=30, ]
-  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
-    ggtitle(gene) + xlab('p-value') +
-    theme(plot.title=element_text(hjust=.5, size=15), 
-      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
-      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
-      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-      panel.border = element_rect(colour = "black", fill=NA, size=1), 
-      panel.background = element_rect(fill = 'white'))
-  suppressWarnings(print(g1))
-  #file_name = sprintf('test_gene_%s_powered_pvalue_dist.pdf', gene)
-  #ggsave(plot = g1, path = '/home/werner/xchrom_snp_skew/code/graphs/gene_skew_to_tissue_skew/escape_testing/', filename = file_name, device = 'pdf', 
-  #     dpi = 300, width = 4, height = 4, units = 'in', useDingbats = FALSE)
-}
-```
+use Fishers method to combine the pvalues for a gene, and get a final p-value per gene. FDR correct over this and call significance to label as escape or not
 
-Now for each gene, calculate the p-value distribution deviation from the uniform distribution. As a proxy for a goodness of fit test
+```{r}
+length(names(table(test_inactive_gene_stats$gene)))
+
+```
 
 
 Filter out low powered pvalues and get a new list of the test genes
+
+
+
 ```{r}
 test_inactive_gene_stats = test_inactive_gene_stats[test_inactive_gene_stats$num_conf_genes>=20, ]
 length(names(table(test_inactive_gene_stats$gene)))
 test_genes =names(table(test_inactive_gene_stats$gene))
 
 ```
+```{r}
+hist(test_inactive_gene_stats$num_conf_genes)
+
+```
+
+
+
+For each gene, Fishers method for summing its pvalues, and then get a pvalue from the chi-squared distribution
+
+```{r}
+
+fishers_method = function(p_values){
+  
+  if(length(p_values) == 1){return(p_values)}
+  
+  df = length(p_values) * 2
+  chi_squared = -2*sum(log(p_values, base = exp(1)))
+  chi_p_value = pchisq(chi_squared, df, lower.tail = F)
+  return(chi_p_value)
+}
+
+```
+
+Genes with at least 50 pvalues
+```{r}
+num_pvals_test_genes_df = test_inactive_gene_stats %>% group_by(gene) %>% summarise(n = n())
+
+powered_test_genes = num_pvals_test_genes_df$gene[num_pvals_test_genes_df$n >=50]
+length(powered_test_genes)
+```
+
+
+```{r}
+
+fishersMethod_test_gene_pvalues = vector(mode = 'numeric', length = length(powered_test_genes))
+names(fishersMethod_test_gene_pvalues) = powered_test_genes
+
+for(i in 1:length(powered_test_genes)){
+  
+  test_gene_pvalues = test_inactive_gene_stats$escape_pvalue[test_inactive_gene_stats$gene == powered_test_genes[i]]
+  fishersMethod_test_gene_pvalues[i] = fishers_method(test_gene_pvalues)
+}
+
+corr_fishersMethod_test_gene_pvalues = p.adjust(fishersMethod_test_gene_pvalues, method = 'BH')
+```
+
 
 
 
 ```{r}
-test_dev_unif = vector(mode = 'numeric', length = length(test_genes))
-test_num_samples = vector(mode = 'numeric', length = length(test_genes))
-names(test_dev_unif) = test_genes
-names(test_num_samples) = test_genes
+hist(fishersMethod_test_gene_pvalues, breaks = seq(0,1, .01))
+hist(corr_fishersMethod_test_gene_pvalues, breaks = seq(0,1, .01))
 
-for(i in 1:length(test_genes)){
+```
 
-  test_pval_distribution =  test_inactive_gene_stats$escape_pvalue[ test_inactive_gene_stats$gene == test_genes[i]]
-  if(length(test_pval_distribution) <=1){next}
-  #Bin the pvalues in .025
-  percentile = as.numeric(seq(0,1,.025))
-  hist_temp = hist(test_pval_distribution, breaks = percentile,plot = F )
-  #Get the deviation from the uniform distribution, density is just 1 per bin
-  test_dev_unif[i] = sum(abs(1 - hist_temp$density))
-  test_num_samples[i] = length(test_pval_distribution)
+```{r}
+sig_escape_genes = names(corr_fishersMethod_test_gene_pvalues[corr_fishersMethod_test_gene_pvalues < .001])
+
+for(i in sig_escape_genes){
+  
+  p_values = test_inactive_gene_stats$escape_pvalue[test_inactive_gene_stats$gene == i]
+  hist(p_values, breaks = seq(0,1, .01), main = i)
+  
+  
 }
 
-plot(test_num_samples,test_dev_unif )
+```
+
+
+get the stats and labels for the powered genes
+
+```{r}
+
+powered_test_inactive_gene_stats = test_inactive_gene_stats[test_inactive_gene_stats$gene %in% powered_test_genes, ]
+powered_test_inactive_gene_stats
+
+powered_test_inactive_gene_stats$fishers_pvalue = rep(NA, nrow(powered_test_inactive_gene_stats))
+powered_test_inactive_gene_stats$escape_label = rep(NA, nrow(powered_test_inactive_gene_stats))
+powered_test_inactive_gene_stats
+```
+
+
+```{r}
+
+for(i in powered_test_genes){
+  
+  gene_index = powered_test_inactive_gene_stats$gene == i
+  gene_fishers_pvalue = corr_fishersMethod_test_gene_pvalues[i]
+  
+  #Add the pvalue
+  powered_test_inactive_gene_stats$fishers_pvalue[gene_index] = gene_fishers_pvalue
+  
+  if(gene_fishers_pvalue <= .001){
+    powered_test_inactive_gene_stats$escape_label[gene_index] = 'novel escape'
+  }else{powered_test_inactive_gene_stats$escape_label[gene_index] = 'confident inactive'}
+  
+}
+
+```
+
+
+
+
+```{r}
+
+for(i in powered_test_genes){
+  
+  temp_df = powered_test_inactive_gene_stats[powered_test_inactive_gene_stats$gene == i, ]
+  fishers_pval = temp_df$fishers_pvalue[1]
+  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
+    ggtitle(sprintf('%s fishers p: %f', i, fishers_pval)) + xlab('p-value') +
+    theme(plot.title=element_text(hjust=.5, size=15), 
+      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
+      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=1), 
+      panel.background = element_rect(fill = 'white'), 
+      aspect.ratio = 1)
+  suppressWarnings(print(g1))
+}
+
 
 ```
 
@@ -618,349 +702,143 @@ detected_escape_genes =names(table(escape_gene_stats$gene))
 ```
 
 
+```{r}
+num_pvals_null_genes_df = null_inactive_gene_stats %>% group_by(gene) %>% summarise(n = n())
+num_pvals_null_genes_df
+powered_null_genes = num_pvals_null_genes_df$gene[num_pvals_null_genes_df$n >=50]
+length(powered_null_genes)
+
+num_pvals_escape_genes_df = escape_gene_stats %>% group_by(gene) %>% summarise(n = n())
+num_pvals_escape_genes_df
+powered_escape_genes = num_pvals_escape_genes_df$gene[num_pvals_escape_genes_df$n >=50]
+length(powered_escape_genes)
+```
+
+
 
 ```{r}
-null_dev_unif = vector(mode = 'numeric', length = length(null_genes))
-null_num_samples = vector(mode = 'numeric', length = length(null_genes))
-names(null_dev_unif) = null_genes
-names(null_num_samples) = null_genes
 
-for(i in 1:length(null_genes)){
+fishersMethod_null_gene_pvalues = vector(mode = 'numeric', length = length(powered_null_genes))
+names(fishersMethod_null_gene_pvalues) = powered_null_genes
 
-  null_pval_distribution = null_inactive_gene_stats$escape_pvalue[null_inactive_gene_stats$gene == null_genes[i]]
-  if(length(null_pval_distribution) <=1){next}
-  #Bin the pvalues in .025
-  percentile = as.numeric(seq(0,1,.025))
-  hist_temp = hist(null_pval_distribution, breaks = percentile,plot = F )
-  #Get the deviation from the uniform distribution, density is just 1 per bin
-  null_dev_unif[i] = sum(abs(1 - hist_temp$density))
-  null_num_samples[i] = length(null_pval_distribution)
+for(i in 1:length(powered_null_genes)){
+  
+  null_gene_pvalues = null_inactive_gene_stats$escape_pvalue[null_inactive_gene_stats$gene == powered_null_genes[i]]
+  fishersMethod_null_gene_pvalues[i] = fishers_method(null_gene_pvalues)
 }
 
-plot(null_num_samples,null_dev_unif )
+corr_fishersMethod_null_gene_pvalues = p.adjust(fishersMethod_null_gene_pvalues, method = 'BH')
 
 
 
-escape_dev_unif = vector(mode = 'numeric', length = length(detected_escape_genes))
-escape_num_samples = vector(mode = 'numeric', length = length(detected_escape_genes))
-names(escape_dev_unif) = detected_escape_genes
-names(escape_num_samples) = detected_escape_genes
+fishersMethod_escape_gene_pvalues = vector(mode = 'numeric', length = length(powered_escape_genes))
+names(fishersMethod_escape_gene_pvalues) = powered_escape_genes
 
-for(i in 1:length(detected_escape_genes)){
-
-  escape_pval_distribution = escape_gene_stats$escape_pvalue[escape_gene_stats$gene == detected_escape_genes[i]]
-  if(length(escape_pval_distribution) <=1){next}
-  #Bin the pvalues in .025
-  percentile = as.numeric(seq(0,1,.025))
-  hist_temp = hist(escape_pval_distribution, breaks = percentile,plot = F )
-  #Get the deviation from the uniform distribution, density is just 1 per bin
-  escape_dev_unif[i] = sum(abs(1 - hist_temp$density))
-  escape_num_samples[i] = length(escape_pval_distribution)
+for(i in 1:length(powered_escape_genes)){
+  
+  escape_gene_pvalues = escape_gene_stats$escape_pvalue[escape_gene_stats$gene == powered_escape_genes[i]]
+  fishersMethod_escape_gene_pvalues[i] = fishers_method(escape_gene_pvalues)
 }
 
-plot(escape_num_samples,escape_dev_unif )
-
-```
-
-
-Get rid of any genes that were filtered out
-
-```{r}
-index = null_num_samples != 0
-
-null_num_samples = null_num_samples[index]
-null_dev_unif = null_dev_unif[index]
-
-
-
-
-```
-```{r}
-index = test_num_samples != 0
-test_num_samples = test_num_samples[index]
-test_dev_unif = test_dev_unif[index]
-
+corr_fishersMethod_escape_gene_pvalues = p.adjust(fishersMethod_escape_gene_pvalues, method = 'BH')
 
 
 
 ```
 
-
-
-
 ```{r}
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100))
-points(escape_num_samples,escape_dev_unif, col = 'red' )
-abline(v = 30)
-abline(h = 30)
+hist(fishersMethod_null_gene_pvalues, breaks = seq(0,1, .01))
+hist(corr_fishersMethod_null_gene_pvalues, breaks = seq(0,1, .01))
 
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100))
-points(test_num_samples,test_dev_unif, col = 'blue' )
-abline(v = 50)
-abline(h = 30)
-
-
-plot(escape_num_samples,escape_dev_unif, ylim =c(0,80), xlim = c(0,1100), col = 'red')
-points(test_num_samples,test_dev_unif, col = 'blue' )
-```
-
-
-Fit an exponential decay function to the inactive data, will work better than random thresholds
-
-##############################
-Supplemental figure 4 panel b
-#############################
-
-```{r}
-
-data.df = data.frame(x = null_num_samples, y = null_dev_unif)
-data.df = data.df[order(data.df$x), ]
-# Select an approximate $\theta$, since theta must be lower than min(y), and greater than zero
-theta.0 <- min(data.df$y) *.5
-
-# Estimate the rest parameters using a linear model
-model.0 <- lm(log(y - theta.0) ~ x, data=data.df)  
-alpha.0 <- exp(coef(model.0)[1])
-beta.0 <- coef(model.0)[2]
-
-# Starting parameters
-start = list(alpha = alpha.0, beta = beta.0, theta = theta.0)
-start
-model = nls(y ~ alpha * exp(beta * x) + theta , data = data.df, start = start)
-#Adjust offset, aiming for a maximum
-fitted_pars = model$m$getPars()
-model$m$setPars(newPars = c(fitted_pars[1], fitted_pars[2], 25))
-
-
-par(pty = 's')
-# Plot fitted curve
-plot(data.df$x, data.df$y, xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75)
-lines(data.df$x , predict(model, list(x = data.df$x)), col = 'black', lwd = 3, lty = 2)
-legend('topright', c('Verified inactive'), col = c('black'), pch = c(1,1))
+hist(fishersMethod_escape_gene_pvalues, breaks = seq(0,1, .01))
+hist(corr_fishersMethod_escape_gene_pvalues, breaks = seq(0,1, .01))
 
 ```
-
-
-
-
-##############################
-Figure 3 panel d
-#############################
-
-
 ```{r}
 
-col_vec = col2rgb('grey5')
-black_alpha = rgb(col_vec[1,1],col_vec[2,1],col_vec[3,1],max = 255, alpha = 200, names = "lt.black")
-grey_alpha = rgb(col_vec[1,1],col_vec[2,1],col_vec[3,1],max = 255, alpha = 50, names = "lt.grey")
-col_vec = col2rgb('red')
-red_alpha = rgb(col_vec[1,1],col_vec[2,1],col_vec[3,1],max = 255, alpha = 125, names = "lt.red")
-```
+temp_genes = names(corr_fishersMethod_null_gene_pvalues[corr_fishersMethod_null_gene_pvalues < .001])
 
-```{r}
-
-
-par(pty = 's')
-null_gene = 'GRIPAP1'
-null_pvals = null_inactive_gene_stats$escape_pvalue[null_inactive_gene_stats$gene == null_gene]
-hist(seq(.025,1,.025), breaks = seq(0,1,.025), freq = F, ylim = c(0, 12), col = grey_alpha, xlab = 'p-value', main = null_gene)
-hist(null_pvals, breaks = seq(.0,1,.025), freq = F, col = black_alpha, add = T)
-legend('topright', c('uniform','inactive gene'), fill = c(grey_alpha, black_alpha))
-
-
-par(pty = 's')
-escape_gene_1 = 'TRAPPC2'
-escape_pvals = escape_gene_stats$escape_pvalue[escape_gene_stats$gene == escape_gene_1]
-hist(seq(.025,1,.025), breaks = seq(0,1,.025), freq = F, ylim = c(0, 12), col = grey_alpha, xlab = 'p-value', main = escape_gene_1)
-hist(escape_pvals, breaks = seq(.0,1,.025), freq = F, col = red_alpha, add = T)
-legend('topright', c('uniform','escape gene'), fill = c(grey_alpha, red_alpha))
-
-
-par(pty = 's')
-escape_gene_2 = 'PLXNB3'
-escape_pvals = escape_gene_stats$escape_pvalue[escape_gene_stats$gene == escape_gene_2]
-hist(seq(.025,1,.025), breaks = seq(0,1,.025), freq = F, ylim = c(0, 12), col = grey_alpha, xlab = 'p-value', main = escape_gene_2)
-hist(escape_pvals, breaks = seq(.0,1,.025), freq = F, col = red_alpha, add = T)
-legend('topright', c('uniform','escape gene'), fill = c(grey_alpha, red_alpha))
-
-```
-
-##############################
-Figure 3 panel d, Supplemental figure 4 panel b
-#############################
-
-```{r}
-x_annot = c(null_num_samples[null_gene],escape_num_samples[escape_gene_1], escape_num_samples[escape_gene_2]) 
-y_annot = c(null_dev_unif[null_gene],escape_dev_unif[escape_gene_1], escape_dev_unif[escape_gene_2]) 
-
-annot_genes = c(null_gene, escape_gene_1, escape_gene_2)
-escape_points = c(rep(1, length(escape_num_samples)))
-escape_points[names(escape_num_samples)%in% annot_genes] = 19
-null_points = c(rep(1, length(null_num_samples)))
-null_points[names(null_num_samples)%in% annot_genes] = 19
-
-
-par(pty = 's')
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = null_points, cex = .75 )
-points(escape_num_samples,escape_dev_unif, col = 'red', pch = escape_points )
-legend('topright', c('Escape genes', 'Inactive genes'), col = c('red','black'), pch = c(1,1))
-text(x_annot, y_annot, labels = c(null_gene, escape_gene_1, escape_gene_2), cex = .9, pos = c(1,3,3), col = c('black', 'red', 'red') )
-
-par(pty = 's')
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = null_points, cex = .75 )
-lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
-points(escape_num_samples,escape_dev_unif, col = 'red', pch = escape_points )
-legend('topright', c('Escape genes', 'Inactive genes'), col = c('red','black'), pch = c(1,1))
-text(x_annot, y_annot, labels = c(null_gene, escape_gene_1, escape_gene_2), cex = .9, pos = c(1,3,3), col = c('black', 'red', 'red') )
-
-par(pty = 's')
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
-points(test_num_samples, test_dev_unif, col = '#0081ff', pch = 1 )
-legend('topright', c('Putative inactive', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-
-par(pty = 's')
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
-lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
-points(test_num_samples, test_dev_unif, col = '#0081ff', pch = 1 )
-legend('topright', c('Putative inactive', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-
-```
-
-
-Get the genes that are above the model and have at least 50 pvalue in their distribution
-
-##############################
-Supplemental figure 4 panel b
-#############################
-
-
-```{r}
-model_y = predict(model, list(x = test_num_samples))
-novel_escape = which(test_dev_unif > model_y & test_num_samples >= 50)
-conf_inactive = which(test_dev_unif <= model_y & test_num_samples >= 50)
-
-length(novel_escape)
-
-par(pty = 's')
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
-lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
-points(test_num_samples[novel_escape], test_dev_unif[novel_escape], col = '#0081ff', pch = 1 )
-legend('topright', c('Novel escape', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-
-
-par(pty = 's')
-plot(null_num_samples,null_dev_unif, ylim =c(0,80), xlim = c(0,1100), xlab = 'Tissue sample size', ylab = 'Deviation from uniform distribution', pch = 1, cex = .75 )
-lines(data.df$x , predict(model, list(x = data.df$x)), col = 'darkblue', lwd = 3, lty = 2)
-points(test_num_samples[conf_inactive], test_dev_unif[conf_inactive], col = '#0081ff', pch = 1, )
-legend('topright', c('Confident inactive', 'Inactive genes'), col = c('#0081ff','black'), pch = c(1,1))
-
-
-```
-
-
-```{r}
-genes_to_plot = names(novel_escape)
-
-```
-
-```{r}
-genes_to_plot
-
-```
-
-################################################
-Supplemental Figure 5 panel c
-#############################################
-
-
-```{r}
-
-for(i in 1:length(genes_to_plot)){
-  gene = genes_to_plot[i]
-  temp_df = test_inactive_gene_stats[test_inactive_gene_stats$gene == gene, ]
-  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
-    ggtitle(gene) + xlab('p-value') +
-    theme(plot.title=element_text(hjust=.5, size=15), 
-      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
-      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
-      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
-      panel.border = element_rect(colour = "black", fill=NA, size=1), 
-      panel.background = element_rect(fill = 'white'))
-  suppressWarnings(print(g1))
+for(i in temp_genes){
+  
+  p_values = null_inactive_gene_stats$escape_pvalue[null_inactive_gene_stats$gene == i]
+  hist(p_values, breaks = seq(0,1, .01), main = i)
 
 }
 
 ```
 
-Calling genes that have a 1 p-value pile up as imprinted, can't really say that without having the actual parental haplotypes. Not going to pursue putative imprinted X genes
-
-
 ```{r}
-imprinted = c('PCSK1N', 'ZNF185', 'ITM2A', 'BEX2', 'RGN')
-novel_escape = genes_to_plot[!genes_to_plot %in% c(imprinted)]
-length(novel_escape)
-```
 
+temp_genes = names(corr_fishersMethod_escape_gene_pvalues[corr_fishersMethod_escape_gene_pvalues < .001])
 
+for(i in temp_genes){
+  
+  p_values = escape_gene_stats$escape_pvalue[escape_gene_stats$gene == i]
+  hist(p_values, breaks = seq(0,1, .01), main = i)
 
-Filter the stats for only the well powered genes, # pvalues >= 50
-
-```{r}
-test_inactive_keep_genes = c(imprinted, novel_escape, c(names(conf_inactive)))
-test_inactive_gene_stats = test_inactive_gene_stats[test_inactive_gene_stats$gene %in% test_inactive_keep_genes, ]
-
-escape_keep_genes = names(escape_num_samples[escape_num_samples >= 50])
-escape_gene_stats = escape_gene_stats[escape_gene_stats$gene %in% escape_keep_genes, ]
-
-inactive_keep_genes = names(null_num_samples[null_num_samples >= 50])
-null_inactive_gene_stats = null_inactive_gene_stats[null_inactive_gene_stats$gene %in% inactive_keep_genes, ]
+}
 
 ```
 
+get the stats and labels for the powered genes
 
 ```{r}
-escape_keep_genes = names(escape_num_samples[escape_num_samples >= 50])
+
+powered_null_inactive_gene_stats = null_inactive_gene_stats[null_inactive_gene_stats$gene %in% powered_null_genes, ]
+powered_null_inactive_gene_stats$fishers_pvalue = rep(NA, nrow(powered_null_inactive_gene_stats))
+powered_null_inactive_gene_stats$escape_label = rep(NA, nrow(powered_null_inactive_gene_stats))
+
+powered_escape_gene_stats = escape_gene_stats[escape_gene_stats$gene %in% powered_escape_genes, ]
+powered_escape_gene_stats$fishers_pvalue = rep(NA, nrow(powered_escape_gene_stats))
+powered_escape_gene_stats$escape_label = rep(NA, nrow(powered_escape_gene_stats))
 
 
+powered_null_inactive_gene_stats
+powered_escape_gene_stats
 ```
-
-
-
-
-Make labels
 ```{r}
-escape_label = rep('confident inactive', dim(test_inactive_gene_stats)[1])
-escape_label[test_inactive_gene_stats$gene %in% imprinted] = 'putative X imprinted'
-escape_label[test_inactive_gene_stats$gene %in% novel_escape] = 'novel escape'
-test_inactive_gene_stats$escape_label = escape_label
-```
 
-```{r}
-null_inactive_gene_stats$escape_label = rep('verified inactive', dim(null_inactive_gene_stats)[1])
-escape_gene_stats$escape_label = rep('known escape', dim(escape_gene_stats)[1])
-escape_gene_stats$escape_label[escape_gene_stats$gene %in% c('KDM5C','EIF2S3')] = 'X imprinted'
-```
+for(i in powered_null_genes){
+  
+  gene_index = powered_null_inactive_gene_stats$gene == i
+  gene_fishers_pvalue = corr_fishersMethod_null_gene_pvalues[i]
+  
+  #Add the pvalue
+  powered_null_inactive_gene_stats$fishers_pvalue[gene_index] = gene_fishers_pvalue
+  #Add the escape label
+  powered_null_inactive_gene_stats$escape_label[gene_index] = 'verified inactive'
+}
 
+
+for(i in powered_escape_genes){
+  
+  gene_index = powered_escape_gene_stats$gene == i
+  gene_fishers_pvalue = corr_fishersMethod_escape_gene_pvalues[i]
+  
+  #Add the pvalue
+  powered_escape_gene_stats$fishers_pvalue[gene_index] = gene_fishers_pvalue
+  #Add the escape label
+  powered_escape_gene_stats$escape_label[gene_index] = 'known escape'
+}
+powered_null_inactive_gene_stats
+powered_escape_gene_stats
+
+```
 
 
 Rbind and plot proportional aggregated density plots
 
 
 ```{r}
-comb_escape_conf_inactive_stats = rbind(null_inactive_gene_stats, escape_gene_stats, test_inactive_gene_stats )
-comb_escape_conf_inactive_stats$escape_label = factor(comb_escape_conf_inactive_stats$escape_label, levels = c('verified inactive','known escape','X imprinted',
-                                                                                                               'confident inactive','novel escape','putative X imprinted'))
+comb_escape_conf_inactive_stats = rbind(powered_null_inactive_gene_stats, powered_escape_gene_stats, powered_test_inactive_gene_stats)
+comb_escape_conf_inactive_stats$escape_label = factor(comb_escape_conf_inactive_stats$escape_label, levels = c('verified inactive','known escape',
+                                                                                                               'confident inactive','novel escape'))
 ```
 
 ```{r}
 table(comb_escape_conf_inactive_stats$escape_label)
 
 ```
-
-
-########################################
-Figure 3 panel e
-########################################
 
 
 ```{r}
@@ -1003,22 +881,10 @@ tab
 length(names(tab))
 ```
 
-```{r}
-tab = table(as.character(comb_escape_conf_inactive_stats$gene[comb_escape_conf_inactive_stats$escape_label == 'X imprinted']))
-tab
-length(names(tab))
-```
-
-```{r}
-tab = table(as.character(comb_escape_conf_inactive_stats$gene[comb_escape_conf_inactive_stats$escape_label == 'putative X imprinted']))
-tab
-length(names(tab))
-```
-
 
 save the combined dataset
 ```{r}
-save(comb_escape_conf_inactive_stats, file = '../data/escape_pval_v8_df.Rdata')
+save(comb_escape_conf_inactive_stats, file = '../data/escape_pval_v8_fishersMethod_df.Rdata')
 ```
 
 Plot individual gene pval densitys for supplemental
@@ -1026,34 +892,24 @@ Plot individual gene pval densitys for supplemental
 
 ```{r}
 
-load('../data/escape_pval_v8_df.Rdata')
-
-```
-
-```{r}
-comb_escape_conf_inactive_stats
+load('../data/escape_pval_v8_fishersMethod_df.Rdata')
 
 ```
 
 
 
 Save as a text file the escape classifications
-ignore the imprinted classification
-
-###############################
-Supplemental table 1
-###############################
 
 ```{r}
 escape_class_df = comb_escape_conf_inactive_stats[!duplicated(comb_escape_conf_inactive_stats$gene), ]
-escape_class_df = escape_class_df[ !grepl( 'imprinted' ,escape_class_df$escape_label), ]
 
 #Only need the gene name and the escape label
 escape_class_df = escape_class_df[ ,c('gene','escape_label')]
 #Change the verified inactive to just inactive
 escape_class_df$escape_label = as.character(escape_class_df$escape_label)
-escape_class_df$escape_label[escape_class_df$escape_label == 'verified inactive'] = 'inactive'
 escape_class_df = escape_class_df[order(escape_class_df$escape_label), ]
+
+escape_class_df
 ```
 
 ```{r}
@@ -1062,4 +918,133 @@ escape_class_df = escape_class_df[order(escape_class_df$escape_label), ]
 write.table(escape_class_df, file = '../data/gene_escape_table.txt', row.names = F, sep='\t', quote = F)
 
 ```
+
+
+```{r}
+table(comb_escape_conf_inactive_stats$escape_label)
+
+```
+
+plot examples of a good test gene, their actual tissue deviations to show where the pvalues are coming from
+
+
+```{r}
+#powered_test_inactive_gene_stats
+
+table(powered_test_inactive_gene_stats$gene)
+
+```
+Use ARHGAP4 as an example of novel escape 
+And SLC6A8 as an example of confident inactive
+
+
+```{r}
+
+for(i in c('ARHGAP4','SLC6A8')){
+  
+  temp_df = powered_test_inactive_gene_stats[powered_test_inactive_gene_stats$gene == i, ]
+  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
+    ggtitle(i) + xlab('p-value') +
+    theme(plot.title=element_text(hjust=.5, size=15), 
+      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
+      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=1), 
+      panel.background = element_rect(fill = 'white'))
+  suppressWarnings(print(g1))
+}
+
+```
+
+To use as example's of generating the empirical pvalue
+
+sample_ids = c(4232, 4249, 4406)
+
+```{r}
+powered_test_inactive_gene_stats %>% filter(gene == 'ARHGAP4', num_conf_genes >= 50)
+
+
+
+```
+475, 4243, 4392
+
+```{r}
+
+gene_example = 'ARHGAP4'
+sample_examples = c(475, 4243, 4392, 5243)
+
+for(i in sample_examples){
+  
+  sample = list.skew.max[[i]]
+  #Calculate absolute deviation from .5
+  all_gene_dev = abs(.5 - sample$C.1)
+  #Grab gene of interest dev
+  test_gene_dev = all_gene_dev[sample$name == gene_example]
+  
+  inactiv_dev_df = data.frame(inactive_devs = all_gene_dev)
+  
+  p = ggplot(inactiv_dev_df, aes(x = inactive_devs)) + geom_histogram(binwidth = 0.02, color = 'black', fill = 'black') +
+    geom_vline(xintercept = test_gene_dev, col = 'red',linetype = 'dashed', size = .75) +
+    xlab('Allelic ratio deviation from 0.5') + ylab('# of genes') + xlim(-.05, .45) +
+    theme(axis.text.y=element_text(size=10),axis.title.y=element_text(size=8),
+        axis.text.x=element_text(size=10),axis.title.x=element_text(size=8),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1), 
+        panel.background = element_rect(fill = 'white'), 
+        aspect.ratio = 1)
+  
+}
+
+```
+
+
+
+Plot examples of pvalue distribution escape genes and inactive genes
+
+get genes with a good number of p values in their distributions
+```{r}
+comb_escape_conf_inactive_stats %>% filter(escape_label %in% c('known escape')) %>% group_by(gene) %>% summarise(n = n())
+
+```
+
+
+
+```{r}
+
+
+
+for(i in c('GABRE','EIF1AX')){
+  
+  temp_df = comb_escape_conf_inactive_stats[comb_escape_conf_inactive_stats$gene == i, ]
+  fishers_pvalue = temp_df$fishers_pvalue[1]
+  g1 = ggplot(temp_df, aes(x = escape_pvalue)) + geom_histogram(binwidth = .025, fill = 'grey', color = 'black') + xlim(-.025,1.025) +
+    ggtitle(sprintf('%s fishers p: %f',i, fishers_pvalue)) + xlab('p-value') +
+    theme(plot.title=element_text(hjust=.5, size=15), 
+      axis.text.y=element_text(size=12),axis.title.y=element_text(size=12),
+      axis.text.x=element_text(size=12),axis.title.x=element_text(size=12),
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=1), 
+      panel.background = element_rect(fill = 'white'), 
+      aspect.ratio = 1)
+  suppressWarnings(print(g1))
+}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

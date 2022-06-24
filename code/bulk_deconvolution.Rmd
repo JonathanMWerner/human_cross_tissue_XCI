@@ -1,0 +1,1095 @@
+
+
+Our skew estimates in a bulk tissue sample are averaging over all present cell types, it is unclear if we can make the braod statements that this tissue is one germ layer or another, it really is dependent on the cell type composition of the tissue. Reviewer comments are concerned that each tissue is too lineage mixed, at least germ layer wise, to make comparisons. 
+
+Goal: get a measure of germ layer composition for samples, get a measure of skew consistency for germ layer measures.
+
+Can try deconvolving the bulk, get a measure of germ layer composition from the cell type composition
+Can extract germ layer markers from single cell and look at their skews in the bulk data
+Can pseudobulk the single cell and see if we can recapitulate the skew analysis, hopefully there is a skewed female present, easiest to verify
+
+Calculate the amount of money needed to recapitulate analysis at the single cell level. Would need smart-seq of millions of cells per tissue, multiplied by the number of samples we processed. In the billions if not trillions of dollars and there is limited amount of that data already available.
+
+
+
+
+```{r}
+
+library(Seurat)
+library(SeuratDisk)
+library(SingleCellExperiment)
+library(zellkonverter)
+library(data.table)
+library(Matrix)
+library(ggplot2)
+library(ggExtra)
+library(RColorBrewer)
+```
+
+```{r}
+gtex_sc_file = '../data/GTEx_8_tissues_snRNAseq_atlas_071421.public_obs.h5ad'
+```
+
+```{r}
+gtex_sce = readH5AD(gtex_sc_file)
+gtex_sce
+```
+
+
+```{r}
+table(gtex_sce$tissue[gtex_sce$Sex == 'Female'])
+
+
+```
+
+
+Adipocyte - Mesoderm
+Endothelium - Mesoderm
+Fibroblast - Mesoderm
+Immune cell types - Mesoderm
+Satellite cell - Mesoderm
+Pericyte  - Mesoderm
+Myocyte - Mesoderm
+ICC - Mesoderm
+
+Melanocytes - Ectoderm
+Neuronal - Ectoderm
+Neuroendocrine - Ectoderm
+Schwann cell - Ectoderm
+Sebaceous gland - Ectoderm
+Sweat gland - Ectoderm
+Epithelial cell (luminal) - Ectoderm
+kerotinocyte - Ectoderm
+
+Epithelial cell (alveolar type I) - Endoderm
+Epithelial cell (alveolar type II) - Endoderm
+Epithelial cell (ciliated) - Endoderm 
+Epithelial cell (club) - Endoderm
+Epithelial cell (basal) - Endoderm
+Epithelial cell (suprabasal)- Endoderm
+Epithelial cell (squamous)- Endoderm
+
+breast is a mix of ectoderm and mesoderm, actually mostly mesoderm
+lung is a mix of endoderm and mesoderm
+heart is mostly mesoderm, some schwann cell ectoderm 
+skin is ectoderm and mesoderm
+skeletal muscle is almost purely mesoderm, some schwann cell ectoderm
+esophagus muscularis is actually mostly mesoderm, some ectoderm and no endoderm
+esophagus mucosa is mesoderm and ectoderm
+
+```{r}
+table(gtex_sce$`Broad cell type`[gtex_sce$tissue == 'skeletalmuscle'])
+
+```
+
+celltype to germ layer mapping
+
+```{r}
+all_celltypes = names(table(gtex_sce$`Broad cell type`))
+
+
+all_celltypes = gsub(' ', '.', all_celltypes)
+all_celltypes = gsub('(', '.', all_celltypes, fixed = T)
+all_celltypes = gsub('/', '.', all_celltypes, fixed = T)
+all_celltypes = gsub(',', '.', all_celltypes, fixed = T)
+all_celltypes = gsub('-', '.', all_celltypes, fixed = T)
+all_celltypes = gsub(')', '.', all_celltypes)
+all_celltypes = c(all_celltypes,'Myocyte..sk') #Cibersort merged the Myocyte .sk.muscle and myocyte.sk. muscle cytoplasmic cell types IDK why.
+
+all_celltypes_germlayer = c('Mesoderm','Mesoderm','Mesoderm','NA','Endoderm','Endoderm','Ectoderm','Endoderm','Endoderm','Endoderm','Ectoderm','Ectoderm',
+                            'Ectoderm','Endoderm','Ectoderm','Endoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm',
+                            'Mesoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm', 'Ectoderm', 'Endoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm',
+                            'Mesoderm', 'Mesoderm', 'Mesoderm', 'Mesoderm', 'Ectoderm', 'Ectoderm', 'Mesoderm','Mesoderm', 'Ectoderm', 'Ectoderm', 
+                            'Ectoderm','Unknown', 'Mesoderm')
+names(all_celltypes_germlayer) = all_celltypes
+
+all_celltypes_germlayer
+```
+
+
+
+Trying CIBERSORTx first, https://cibersortx.stanford.edu/tutorial.php
+Allows the use of single cell data to make a signature matrix to deconvolve the bulk
+
+For each tissue, make a .txt file with gene symbols in first column and cell lables in row 1, they need to be the cell type labels. No unassigned cells. CIBERSORT will normalize, raw counts to CPM
+Should use ensemble IDs for the rownames as that's the output for the bulk expression data
+Apparently using TMM normalization is best, but get it working with defualts first.
+
+Just use the female cells first, can try adding the male and see if there's a difference
+
+```{r}
+#The gene names in the single cell data
+singlecell_ensemblIDS = rowData(gtex_sce)$gene_ids
+
+singlecell_ensemblIDS[1:10]
+```
+
+
+```{r}
+lung_female_index = gtex_sce$tissue == 'lung' & gtex_sce$Sex == 'Female'
+sum(lung_female_index)
+lung_female_celltypes = gtex_sce$`Broad cell type`[lung_female_index]
+table(lung_female_celltypes)
+
+lung_female_counts = assay(gtex_sce, 'counts')[ , lung_female_index]
+rownames(lung_female_counts) = rowData(gtex_sce)$gene_ids
+colnames(lung_female_counts) = lung_female_celltypes
+dim(lung_female_counts)
+```
+
+
+
+```{r}
+hist(gtex_sce$nGenes[lung_female_index], main = 'Number of genes')
+hist(gtex_sce$nUMIs[lung_female_index], main = 'Number of UMIs')
+hist(gtex_sce$PercentMito[lung_female_index], main = 'Percent Mito')
+hist(gtex_sce$PercentRibo[lung_female_index], main = 'Percent Ribo')
+```
+
+```{r}
+colnames(lung_female_counts)[1:50]
+test = as.matrix(lung_female_counts)
+colnames(test)[1:50]
+```
+
+```{r}
+test_2 = as.data.frame(test, check.names = F)
+test_2
+temp = rownames(test_2)
+temp_df = data.frame(Genes = temp)
+temp_df
+
+test_3 = cbind(temp_df, test_2)
+test_3
+
+colnames(test_3)[1:50]
+table(colnames(test_3))
+```
+
+
+
+Column names are getting messed up when saving tthe matrix, convert to dataframe and strip the extra .X at the ends
+
+
+```{r}
+
+write.table(test_3, file ='../data/lung_female_counts.txt' , sep = '\t', 
+            col.names = colnames(test_3), row.names = F)
+
+
+```
+
+
+
+
+```{r}
+test = read.table('../data/lung_female_counts.txt')
+
+```
+
+```{r}
+test
+
+```
+
+
+
+Do the same for the other tissues we have single cell data for
+
+```{r}
+single_cell_tissues = names(table(gtex_sce$tissue))
+single_cell_tissues = single_cell_tissues[!single_cell_tissues %in% c('lung', 'prostate')]
+single_cell_tissues
+```
+
+
+```{r}
+tissue_num = 6
+tissue_index = gtex_sce$tissue == single_cell_tissues[tissue_num] & gtex_sce$Sex == 'Female'
+tissue_celltypes =  gtex_sce$`Broad cell type`[tissue_index]
+tissue_counts = assay(gtex_sce, 'counts')[ , tissue_index]
+rownames(tissue_counts) = rowData(gtex_sce)$gene_ids
+colnames(tissue_counts) = tissue_celltypes
+
+hist(gtex_sce$nGenes[tissue_index], main = 'Number of genes')
+hist(gtex_sce$nUMIs[tissue_index], main = 'Number of UMIs')
+hist(gtex_sce$PercentMito[tissue_index], main = 'Percent Mito')
+hist(gtex_sce$PercentRibo[tissue_index], main = 'Percent Ribo')
+
+temp_m = as.matrix(tissue_counts)
+temp_df_1 = as.data.frame(temp_m, check.names = F)
+temp_genes = rownames(temp_df_1)
+temp_df_genes = data.frame(Genes = temp_genes)
+
+temp_df_2 = cbind(temp_df_genes, temp_df_1)
+
+tissue_file = sprintf('../data/%s_female_counts.txt',single_cell_tissues[tissue_num] )
+tissue_file
+
+```
+
+```{r}
+
+write.table(temp_df_2, file =tissue_file , sep = '\t', col.names = colnames(temp_df_2), row.names = F)
+
+```
+
+
+________________________________________________________________________________________________________________
+#######################################################
+Bulk expression data prep
+########################################################
+
+
+Prepare the expression data for the bulk samples
+
+Pull out some of the lung samples and put them all in a matrix
+
+```{r}
+#These are the samples we actually worked with. The sample_index lines up with the row from sample_meta here '/home/werner/xchrom_snp_skew/code/scripts_keep/data/sample_metadata_with_v8.Rdata'
+#skew_and_stats_df
+load('../data/v8_GTEx_skew_and_stats_df.Rdata')
+dim(skew_and_stats_df)
+```
+
+Use the same sample filtering criteria as before
+
+```{r}
+num_snp_index = skew_and_stats_df$num_snps >= 10 & skew_and_stats_df$CI_width < .15
+filt_skew_and_stats_df = skew_and_stats_df[num_snp_index, ]
+
+all_used_sample_index = filt_skew_and_stats_df$sample_index
+
+dim(filt_skew_and_stats_df)
+```
+
+```{r}
+filt_skew_and_stats_df
+
+
+```
+
+
+
+
+Total sample metadata, the Run_s column lines up with the sample names we have the data saved as
+v7 files have SRR ids and v8 have the GTEx sample IDs
+v7 STAR output is saved here /data/GTEx/STARouts/SAMPLE_ID.ReadsPerGene.out.tab
+v8 STAR output is saved on Elzar at /data/hover/work/werer1, moved to /data/GTEx/STARouts/SAMPLE_ID.ReadsPerGene.out.tab
+
+```{r}
+load('../data/sample_metadata_with_v8.Rdata')
+dim(sample_meta)
+```
+
+```{r}
+sample_meta
+
+```
+
+
+
+```{r}
+#These are the minimum number of v7 and v8 files I should have, skew_and_stats_df samples had wig and vcf output and at least 2 well powered het snps 
+table(grepl('SRR', sample_meta$Run_s[skew_and_stats_df$sample_index]))
+v7_index = grepl('SRR', sample_meta$Run_s[skew_and_stats_df$sample_index])
+
+skew_and_stats_df[!v7_index, ]
+
+```
+
+
+
+How many v7 and v8 samples do we have metadata for
+
+```{r}
+length(sample_meta$Run_s[all_used_sample_index])
+
+table(grepl('SRR', sample_meta$Run_s[all_used_sample_index]))
+
+```
+
+
+All the expression files are at '/data/GTEx/STARouts/__.ReadsPerGene.out.tab'
+These are from our STAR mapping of the GTEx fastq files. Input STAR output from your own mapping runs
+
+```{r}
+all_used_exp_files = paste('/data/GTEx/STARouts/',sample_meta$Run_s[all_used_sample_index], sep = '')
+all_used_exp_files = paste(all_used_exp_files, '.ReadsPerGene.out.tab', sep = '')
+all_used_exp_files[1:10]
+```
+
+
+Find the lung samples
+
+```{r}
+lung_index = which(sample_meta$body_site_s[all_used_sample_index] == 'Lung')
+sample_meta[all_used_sample_index, ][lung_index, ]
+
+```
+
+```{r}
+lung_expression_files = all_used_exp_files[lung_index]
+all_lung_bulk_exp = fread(lung_expression_files[1], skip = 4, select = c('V1','V2'), col.names = c('genes',sample_meta$Run_s[all_used_sample_index][lung_index[1]] ))
+
+for(i in 2:length(lung_expression_files)){
+  
+  data_exp =  fread(lung_expression_files[i], skip = 4, select = c('V2'), col.names = c(sample_meta$Run_s[all_used_sample_index][lung_index[i]] ))
+  all_lung_bulk_exp[ ,colnames(data_exp)] = data_exp
+}
+
+
+dim(all_lung_bulk_exp)
+head(all_lung_bulk_exp)
+
+
+```
+Strip the ensembl versions and see how much overlaps with the single cell gene names
+```{r}
+
+temp_genes = sapply(strsplit(all_lung_bulk_exp$genes, split = '.', fixed = T), '[[', 1)
+all_lung_bulk_exp$genes = temp_genes
+
+all_lung_bulk_exp_trim = all_lung_bulk_exp[all_lung_bulk_exp$genes %in% rownames(lung_female_counts), ]
+
+dim(lung_female_counts)
+
+table(rownames(lung_female_counts) %in% temp_genes)
+table( temp_genes %in% rownames(lung_female_counts))
+dim(all_lung_bulk_exp_trim)
+```
+
+
+```{r}
+
+write.table(all_lung_bulk_exp, file ='../data/all_lung_bulk_exp.txt' , sep = '\t', )
+write.table(all_lung_bulk_exp_trim, file ='../data/all_lung_bulk_exp_trim.txt' , sep = '\t', )
+
+```
+
+
+DO the same for the other tissues
+single cell labels
+ "breast"              "esophagusmucosa"     "esophagusmuscularis" "heart"               "skeletalmuscle"      "skin"  
+ Bulk labels
+ 'Breast - Mammary Tissue', 'Esophagus - Mucosa', 'Esophagus - Muscularis', 'Heart - Atrial Appendage', 'Heart - Left Ventricle', 'Muscle - Skeletal', 
+ 'Skin - Not Sun Exposed (Suprapubic)', 'Skin - Sun Exposed (Lower leg)'
+
+
+```{r}
+table(sample_meta$body_site_s[all_used_sample_index])
+
+```
+
+
+
+
+
+```{r}
+bulk_tissues = c( 'Breast - Mammary Tissue', 'Esophagus - Mucosa', 'Esophagus - Muscularis', 'Heart - Atrial Appendage', 'Heart - Left Ventricle', 
+                  'Muscle - Skeletal', 'Skin - Not Sun Exposed (Suprapubic)', 'Skin - Sun Exposed (Lower leg)')
+
+
+bulk_tissues_filenames = c( 'breast', 'esophagusmucosa', 'esophagusmuscularis', 'heartAtrialAppendage', 'heartLeftVentricle', 
+                  'muscleskeletal', 'skinSuprapubic', 'skinLowerLeg')
+```
+
+
+```{r}
+tissue_num = 8
+tissue_index = which(sample_meta$body_site_s[all_used_sample_index] == bulk_tissues[tissue_num])
+
+tissue_expression_files = all_used_exp_files[tissue_index]
+all_tissue_bulk_exp = fread(tissue_expression_files[1], skip = 4, select = c('V1','V2'), col.names = c('genes',sample_meta$Run_s[all_used_sample_index][tissue_index[1]] ))
+
+for(i in 2:length(tissue_expression_files)){
+  
+  data_exp =  fread(tissue_expression_files[i], skip = 4, select = c('V2'), col.names = c(sample_meta$Run_s[all_used_sample_index][tissue_index[i]] ))
+  all_tissue_bulk_exp[ ,colnames(data_exp)] = data_exp
+}
+
+
+dim(all_tissue_bulk_exp)
+head(all_tissue_bulk_exp)
+
+temp_genes = sapply(strsplit(all_tissue_bulk_exp$genes, split = '.', fixed = T), '[[', 1)
+all_tissue_bulk_exp$genes = temp_genes
+
+all_tissue_bulk_exp_trim = all_tissue_bulk_exp[all_tissue_bulk_exp$genes %in% singlecell_ensemblIDS, ]
+dim(all_tissue_bulk_exp_trim)
+
+all_bulk_file = sprintf('../data/all_%s_bulk_exp.txt', 
+                        bulk_tissues_filenames[tissue_num] )
+trim_bulk_file = sprintf('../data/all_%s_bulk_exp_trim.txt',
+                         bulk_tissues_filenames[tissue_num] )
+all_bulk_file 
+trim_bulk_file 
+
+```
+
+
+```{r}
+
+write.table(all_tissue_bulk_exp, file =all_bulk_file , sep = '\t', )
+write.table(all_tissue_bulk_exp_trim, file =trim_bulk_file , sep = '\t', )
+
+```
+
+
+
+
+__________________________________________________________________________
+##########################################################################
+Run deconvolution on the CIBERSORT server and load up the results here
+
+
+##########################################################################
+
+
+```{r}
+tiss_deconv_dirs = list.dirs('../data/cibersort_deconvolution/cibersort_results')
+tiss_deconv_dirs = tiss_deconv_dirs[2:length(tiss_deconv_dirs)]
+tiss_deconv_dirs = paste0(tiss_deconv_dirs, '/')
+tiss_deconv_dirs
+```
+
+```{r}
+deconv_tissues = c('breast','esophagusMucosa','esophagusMuscularis','heartAtrialAppendage','heartLeftVentricle','lung','skeletalMuscle','skinLowerLeg',
+                   'skinSuprapubic')
+```
+
+
+breast is majority mesoderm, then ectoderm
+esophagus mucosa is majority endoderm, then mesoderm, then ectoderm
+esophagus muscularis is mostly purely mesoderm, slight ectoderm
+heart atrial appendage is mostly purely mesoderm, slight ectoderm
+heart left ventricle is mostly purely mesoderm, slight ectoderm
+lung is mostly endoderm, then mesoderm
+skeletal muscle is pure mesoderm 
+skin lower leg is mostly ectoderm, then mesoderm
+skin suprapubic is mostly ectoderm, then mesoderm
+
+
+function to make the tissue dataframe
+```{r}
+
+get_GL_perc_df = function(tissue_num, all_celltypes_germlayer){ 
+  
+  tiss_deconv_files = list.files(tiss_deconv_dirs[tissue_num])
+  gtex_deconv_batchCorr = read.table(paste0(tiss_deconv_dirs[tissue_num],tiss_deconv_files[1] ), header = T, sep = '\t')
+  
+  celltypes_present = colnames(gtex_deconv_batchCorr)[2:(length(colnames(gtex_deconv_batchCorr)) - 3)]
+  germlayer_index = match(celltypes_present, names(all_celltypes_germlayer))
+  celltype_germlayer_vec  = c('Mixture', all_celltypes_germlayer[germlayer_index], 'P.value', 'Correlation', 'RMSE')
+  
+  if(sum(celltype_germlayer_vec == 'Mesoderm') == 1){
+    mesoderm_percentage = gtex_deconv_batchCorr[ ,celltype_germlayer_vec == 'Mesoderm']
+  }else{mesoderm_percentage = rowSums(gtex_deconv_batchCorr[ ,celltype_germlayer_vec == 'Mesoderm'])}
+  
+  if(sum(celltype_germlayer_vec == 'Endoderm') == 1){
+    endoderm_percentage = gtex_deconv_batchCorr[ ,celltype_germlayer_vec == 'Endoderm']
+  }else{endoderm_percentage = rowSums(gtex_deconv_batchCorr[ ,celltype_germlayer_vec == 'Endoderm'])}
+  
+  if(sum(celltype_germlayer_vec == 'Ectoderm') == 1){
+    ectoderm_percentage = gtex_deconv_batchCorr[ ,celltype_germlayer_vec == 'Ectoderm']
+  }else{ectoderm_percentage = rowSums(gtex_deconv_batchCorr[ ,celltype_germlayer_vec == 'Ectoderm'])}
+  
+  gtex_deconv_batchCorr$mesodermPercentage = mesoderm_percentage
+  gtex_deconv_batchCorr$endodermPercentage = endoderm_percentage
+  gtex_deconv_batchCorr$ectodermPercentage = ectoderm_percentage
+  
+  return(gtex_deconv_batchCorr)
+}
+```
+
+
+########################
+Figure 4 panel D
+
+Supp. Fig. 6
+
+#######################
+
+
+
+```{r}
+tissue_num = 9
+
+tissue_deconv_df = get_GL_perc_df(tissue_num, all_celltypes_germlayer)
+
+germ_layer_colors = brewer.pal(n = 4, name = "Spectral")
+ecto_color = germ_layer_colors[1]
+endo_color = germ_layer_colors[2]
+meso_color = germ_layer_colors[4]
+
+#Color vector for the germ layer violin plot
+percent_gl_colors = c('mesodermPercentage' = meso_color,'endodermPercentage' = endo_color,'ectodermPercentage' = ecto_color)
+
+celltypes_present = colnames(tissue_deconv_df)[2: (dim(tissue_deconv_df)[2] - 6)]
+germlayer_index = match(celltypes_present, names(all_celltypes_germlayer))
+germlayer_vec = all_celltypes_germlayer[germlayer_index]
+#Color vector for the celltype violin plot
+germlayer_vec[germlayer_vec == 'Mesoderm'] = meso_color
+germlayer_vec[germlayer_vec == 'Endoderm'] = endo_color
+germlayer_vec[germlayer_vec == 'Ectoderm'] = ecto_color
+
+ggplot(reshape2::melt(tissue_deconv_df[ ,2: (dim(tissue_deconv_df)[2] - 6)], variable.name = c('Celltype')), 
+       aes(x = Celltype, y = value, fill = Celltype) ) + 
+  geom_violin(scale = 'width') + geom_point(position = position_jitter(seed = 1, width = 0.1), size = .5) + ggtitle(deconv_tissues[tissue_num]) + 
+  ylab('Deconvolved cell type percentages') + scale_fill_manual(values = germlayer_vec) +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1),panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+
+
+#file_name = sprintf('%s_celltype_percentages_violinplot.pdf',deconv_tissues[tissue_num] )
+#ggsave(filename = file_name, path = '/home/werner/xchrom_snp_skew/code/graphs/cibersort_deconv/', device = 'pdf', useDingbats = F, height = 6 )
+
+ggplot(reshape2::melt(tissue_deconv_df[ ,c('mesodermPercentage','endodermPercentage','ectodermPercentage')], variable.name = c('Germlayer')), 
+       aes(x = Germlayer, y = value, fill = Germlayer) ) + 
+  geom_violin(scale = 'width') + geom_point(position = position_jitter(seed = 1, width = 0.1), size = .5) + ggtitle(deconv_tissues[tissue_num]) + 
+  ylab('Deconvolved germ layer percentages') + scale_fill_manual(values = percent_gl_colors)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+
+#file_name = sprintf('%s_germlayer_percentages_violinplot.pdf',deconv_tissues[tissue_num] )
+
+#ggsave(filename = file_name, path = '/home/werner/xchrom_snp_skew/code/graphs/cibersort_deconv/', device = 'pdf', useDingbats = F )
+
+
+#stacked barplot for germ layer percentages
+
+#Order on endoderm: esophagusMucosa, lung
+#order on ectoderm: breast, esophagusMuscularis, heartAtrialAppendage, heartLeftVentricle, skinLowerLeg, skinSuprapubic
+#order on mesoderm: skeletal_muscle
+
+#mixture_levels = tissue_deconv_df$Mixture[order(tissue_deconv_df$endodermPercentage)]
+mixture_levels = tissue_deconv_df$Mixture[order(tissue_deconv_df$ectodermPercentage)]
+stacked_df = reshape2::melt(tissue_deconv_df[ ,c('Mixture','mesodermPercentage','endodermPercentage','ectodermPercentage')], id = c('Mixture'), variable.name = c('Germlayer')) 
+stacked_df$Mixture = factor(stacked_df$Mixture, levels = mixture_levels)
+
+ggplot(stacked_df,aes(x = Mixture, y = value, fill = Germlayer)) + 
+  geom_bar(position = 'stack', stat = 'identity' ) + scale_fill_manual(values = percent_gl_colors ) +
+  xlab(sprintf('%s tissue samples',deconv_tissues[tissue_num])) + ylab("Deconvolved germ layer percentages") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+#file_name = sprintf('%s_germlayer_percentages_stacked_barplot.pdf',deconv_tissues[tissue_num] )
+#ggsave(filename = file_name, path = '/home/werner/xchrom_snp_skew/code/graphs/cibersort_deconv/', device = 'pdf', useDingbats = F )
+
+#save the tissue deconv dataframes with the grouped germ layer percentages
+#filename = paste0(tiss_deconv_dirs[tissue_num], sprintf('withGL_percs_batchCorr_cibersort_%s_deconv.txt', deconv_tissues[tissue_num]))
+#write.table(tissue_deconv_df, file =filename, sep = '\t')
+
+
+```
+
+
+
+
+____________________________________________________
+###################################################
+
+Goal is to get estimated germ layer specific skews and calculate their correlations for a single tissue.
+Use the cell type signature genes calculated from CIBERSORT, go back through the filtered het SNPs and see how many germ layer specific SNPs we have for each germ layer gene set
+Calculate correlations if there is enough data
+
+
+##################################################
+
+breast only has mesoderm markers present, range of 1 - 14 per samples, mean of 8-7
+esophagus mucosa has markers for all three, 94 samples have at least one marker from each germ layer 
+esophagus muscularis mainly has mesoderm markers, has 124 samples with at least one ectoderm marker too though
+heart atrial appendage is mostly mesoderm, a few samples with a single ectoderm marker
+same for heart left ventricle
+lung has mesoderm and endoderm, 147 samples with at least one of each
+skeletal muscle is same story as heart
+skin lower leg has some mmesoderm and ectoodermm markers, 148 samples with at least one of each
+skin suprapubic same story, 109 samples with at least one of each
+
+
+For comparing germ layer skews within a tissue, start with esophagus mucosa, lung, and skin. They have a mix of markers present from the three germ layers.
+
+
+
+load up the filtered het snps per sample
+```{r}
+load("../data/all_v8_GTEx_gene_filtered.skew.est.max.genes.Rdata")
+
+
+```
+
+```{r}
+length(list.skew.max)
+head(list.skew.max)
+```
+
+reminder
+```{r}
+deconv_tissues = c('breast','esophagusMucosa','esophagusMuscularis','heartAtrialAppendage','heartLeftVentricle','lung','skeletalMuscle','skinLowerLeg',
+                   'skinSuprapubic')
+```
+
+
+
+```{r}
+tissue_num =9
+
+tiss_deconv_files = list.files(tiss_deconv_dirs[tissue_num])
+
+gtex_deconv_batchCorr = read.table(paste0(tiss_deconv_dirs[tissue_num],tiss_deconv_files[1] ), header = T, sep = '\t')
+gtex_signature_genes_deconv = read.table(paste0(tiss_deconv_dirs[tissue_num],tiss_deconv_files[2] ), header = T, sep = '\t')
+
+
+```
+
+
+```{r}
+celltypes_present = colnames(gtex_signature_genes_deconv)[2: dim(gtex_signature_genes_deconv)[2]]
+germlayer_index = match(celltypes_present, names(all_celltypes_germlayer))
+germlayer_vec = all_celltypes_germlayer[germlayer_index]
+germlayer_vec = c('NAME',germlayer_vec)
+
+#For the germ layer groupings of cell types, get the number of cell types that gene was a signature gene for
+mes_sigs = rep(0, dim(gtex_signature_genes_deconv)[1])
+ect_sigs = rep(0, dim(gtex_signature_genes_deconv)[1])
+end_sigs = rep(0, dim(gtex_signature_genes_deconv)[1])
+
+
+if(sum(germlayer_vec == 'Mesoderm') == 1){
+  mes_sigs = as.numeric(gtex_signature_genes_deconv[  ,germlayer_vec == 'Mesoderm' ] != 1)
+}else if(sum(germlayer_vec == 'Mesoderm') > 1) {  
+  mes_sigs = rowSums(gtex_signature_genes_deconv[  ,germlayer_vec == 'Mesoderm' ] != 1  ) 
+  }
+
+if(sum(germlayer_vec == 'Ectoderm') == 1){
+  ect_sigs = as.numeric(gtex_signature_genes_deconv[  ,germlayer_vec == 'Ectoderm' ] != 1)
+}else if(sum(germlayer_vec == 'Ectoderm') > 1) {  
+  ect_sigs = rowSums(gtex_signature_genes_deconv[  ,germlayer_vec == 'Ectoderm' ] != 1  ) 
+  }
+
+if(sum(germlayer_vec == 'Endoderm') == 1){
+  end_sigs = as.numeric(gtex_signature_genes_deconv[  ,germlayer_vec == 'Endoderm' ] != 1)
+}else if(sum(germlayer_vec == 'Endoderm') > 1) {  
+  end_sigs = rowSums(gtex_signature_genes_deconv[  ,germlayer_vec == 'Endoderm' ] != 1  ) 
+  }
+
+#Get the genes that were only a signature within a single germ layer, get the ensembl IDs
+mes_markers_ind = which(mes_sigs > 0 & ect_sigs == 0 & end_sigs == 0 )
+mes_markers = gtex_signature_genes_deconv$NAME[mes_markers_ind]
+length(mes_markers)
+
+ect_markers_ind = which(mes_sigs == 0 & ect_sigs > 0 & end_sigs == 0 )
+ect_markers = gtex_signature_genes_deconv$NAME[ect_markers_ind]
+length(ect_markers)
+
+end_markers_ind = which(mes_sigs == 0 & ect_sigs == 0 & end_sigs > 0 )
+end_markers = gtex_signature_genes_deconv$NAME[end_markers_ind]
+length(end_markers)
+```
+
+Add if the gene is a germ layer marker or not to the CIBERsort stats, save as text files for supplementary data
+
+```{r}
+gtex_signature_genes_deconv
+gtex_deconv_batchCorr
+
+
+```
+
+
+Get the sample indexes to look through the filtered het SNPs
+```{r}
+tissue_snp_index = match(gtex_deconv_batchCorr$Mixture, sample_meta$Run_s)
+donor_ids = sample_meta$Donor_id[tissue_snp_index]
+tissue_snps_list.max = list.skew.max[tissue_snp_index]
+head(tissue_snps_list.max)
+length(tissue_snps_list.max)
+```
+
+
+
+See how many of the Mes and Ect and End markers are on the X and present in this tissue's data
+
+
+```{r}
+mes_markers_present = vector(mode = 'numeric', length = length(tissue_snps_list.max))
+ect_markers_present = vector(mode = 'numeric', length = length(tissue_snps_list.max))
+end_markers_present = vector(mode = 'numeric', length = length(tissue_snps_list.max))
+
+for(i in 1:length(tissue_snps_list.max)){
+  
+  mes_markers_present[i] = sum(mes_markers %in%  tissue_snps_list.max[[i]]$ensemblID)
+  ect_markers_present[i] = sum(ect_markers %in%  tissue_snps_list.max[[i]]$ensemblID)
+  end_markers_present[i] = sum(end_markers %in%  tissue_snps_list.max[[i]]$ensemblID)
+}
+
+
+```
+
+```{r}
+hist(mes_markers_present)
+hist(ect_markers_present)
+hist(end_markers_present)
+
+```
+
+
+Compile the X-linked germ layer markers we detect per tissue, the cell types it defined in the deconvolution and and which germ layer we assign it as a marker 
+
+```{r}
+marker_colnames = colnames(tissue_snps_list.max[[1]])
+
+mes_df = data.frame(matrix(nrow = 0, ncol = length(marker_colnames) ))
+end_df = data.frame(matrix(nrow = 0, ncol = length(marker_colnames) ))
+ect_df = data.frame(matrix(nrow = 0, ncol = length(marker_colnames) ))
+colnames(mes_df) = marker_colnames
+colnames(end_df) = marker_colnames
+colnames(ect_df) = marker_colnames
+
+
+
+for(i in 1:length(tissue_snps_list.max)){
+
+  sample_mes_markers = tissue_snps_list.max[[i]][tissue_snps_list.max[[i]]$ensemblID %in% mes_markers, ]
+  sample_end_markers = tissue_snps_list.max[[i]][tissue_snps_list.max[[i]]$ensemblID %in% end_markers, ]
+  sample_ect_markers = tissue_snps_list.max[[i]][tissue_snps_list.max[[i]]$ensemblID %in% ect_markers, ]
+  
+  mes_df = rbind(mes_df, sample_mes_markers)
+  end_df = rbind(end_df, sample_end_markers)
+  ect_df = rbind(ect_df, sample_ect_markers)
+
+}
+
+
+mes_df = mes_df[!duplicated(mes_df$ensemblID), ]
+end_df = end_df[!duplicated(end_df$ensemblID), ]
+ect_df = ect_df[!duplicated(ect_df$ensemblID), ]
+
+mes_df$germlayer_marker = rep('Mesoderm', length = nrow(mes_df))
+end_df$germlayer_marker = rep('Endoderm', length = nrow(end_df))
+ect_df$germlayer_marker = rep('Ectoderm', length = nrow(ect_df))
+
+mes_df = mes_df[ ,c('ensemblID','name','germlayer_marker')]
+end_df = end_df[ ,c('ensemblID','name','germlayer_marker')]
+ect_df = ect_df[ ,c('ensemblID','name','germlayer_marker')]
+
+
+
+germlayer_marker_comp_df = rbind(mes_df, end_df, ect_df)
+germlayer_marker_comp_df$tissue = rep(deconv_tissues[tissue_num], nrow(germlayer_marker_comp_df))
+
+#add the cell type the gene is a marker for and the tissue 
+
+celltype_vec = vector(mode = 'character', length = nrow(germlayer_marker_comp_df))
+
+celltypes = colnames(gtex_signature_genes_deconv)
+celltypes = celltypes[2:length(celltypes)]
+
+for(i in 1:nrow(germlayer_marker_comp_df)){
+  
+  test = germlayer_marker_comp_df$ensemblID[i]
+  marker_for = celltypes[gtex_signature_genes_deconv[gtex_signature_genes_deconv$NAME == test,2:ncol(gtex_signature_genes_deconv) ] > 1]
+  celltype_vec[i] = paste(marker_for, sep = '', collapse = ' ')
+}
+
+
+germlayer_marker_comp_df$celltype = celltype_vec
+germlayer_marker_comp_df
+
+file_name = sprintf('../data/cibersort_deconvolution/cibersort_results/celltype_marker_df/%s_df.txt',deconv_tissues[tissue_num])
+write.table(germlayer_marker_comp_df, file = file_name, sep = '\t', row.names = F)
+
+```
+
+save and combine all the tissue marker dfs into one big one
+
+```{r}
+
+tiss_germlayer_marker_df_files = list.files('../data/cibersort_deconvolution/cibersort_results/celltype_marker_df', full.names = T)
+
+
+
+all_tissue_germlayer_marker_df = read.table(tiss_germlayer_marker_df_files[1], sep = '\t', header = T)
+
+for(i in 2:length(tiss_germlayer_marker_df_files)){
+  all_tissue_germlayer_marker_df = rbind(all_tissue_germlayer_marker_df, read.table(tiss_germlayer_marker_df_files[i], sep = '\t', header = T) )
+}
+
+
+all_tissue_germlayer_marker_df
+
+write.table(all_tissue_germlayer_marker_df, file = '../data/cibersort_deconvolution/cibersort_results/celltype_marker_df/compiled_all_tissue_germlayermarkers.txt',
+            sep = '\t', row.names = F)
+```
+
+
+
+
+
+Add a germ layer marker label to each SNP, look at the expression ratio distributions for the markers and the non markers
+
+So it's difficult to get robust statistics when the sample sizes for the germ layer markers are so small. But visually, the germ layer markers are trending together.
+I think a graph showing several tissue examples of how the markers are covarying over increasing skew will be a good visualization.
+Then get the correlations of the median skew per germ layer marker set. The sample sizes are so small so not really expecting stronng correlations, but even a weak positive correlation plus the above visualization should make the point clear.
+
+
+```{r}
+# Functions to fold and unfold ratios 
+folded <- function(x) { apply( cbind(x,1-x), 1, max)} 
+unfold <- function(x) { c(x,1-x) } 
+
+```
+
+
+```{r}
+cor_permute = function(x,y){
+  permute_y = sample(y,size=length(y), replace=FALSE)
+  corr = suppressWarnings(cor(x,permute_y, method='pearson'))
+  return(corr)
+}
+
+```
+
+
+
+
+
+samples to use is increasinng skew visualization
+lung - 
+esophagus mucosa - c(18, 37, 128, 141, 31 )
+skin lower leg - 
+skin suprapubic - 
+
+```{r}
+#Color vector for the germ layer violin plot
+gl_markers_colors = c('Mesoderm markers' = meso_color,'Endoderm markers' = endo_color,'Ectoderm markers' = ecto_color, 'Not markers' = 'white')
+
+median_mes_ratio = vector(mode = 'numeric', length = length(tissue_snps_list.max))
+median_ect_ratio = vector(mode = 'numeric', length = length(tissue_snps_list.max))
+median_end_ratio = vector(mode = 'numeric', length = length(tissue_snps_list.max))
+median_nonMark_ratio = vector(mode = 'numeric', length = length(tissue_snps_list.max))
+
+for(i in 1:length(tissue_snps_list.max)){
+
+  test = tissue_snps_list.max[[i]]
+  germlayer_marker = rep('Not markers', nrow(test))
+  germlayer_marker[test$ensemblID %in% mes_markers] = 'Mesoderm markers'
+  germlayer_marker[test$ensemblID %in% ect_markers] = 'Ectoderm markers'
+  germlayer_marker[test$ensemblID %in% end_markers] = 'Endoderm markers'
+  
+  test$germlayer_marker = germlayer_marker
+  test$folded_snp_ratios = folded(test$C.1)
+  
+  median_mes_ratio[i] = median(test$folded_snp_ratios[test$germlayer_marker == 'Mesoderm markers'])
+  median_ect_ratio[i] = median(test$folded_snp_ratios[test$germlayer_marker == 'Ectoderm markers'])
+  median_end_ratio[i] = median(test$folded_snp_ratios[test$germlayer_marker == 'Endoderm markers'])
+  median_nonMark_ratio[i] = median(test$folded_snp_ratios[test$germlayer_marker == 'Not markers'])
+  
+  #p1 = ggplot(test, aes(x = germlayer_marker, y = folded_snp_ratios, fill = germlayer_marker )) + geom_violin(scale = 'width') + ylim(.45, 1) +
+  #  geom_point(position = position_jitter(seed = 1, width = 0.1)) + scale_fill_manual(values = gl_markers_colors) + ggtitle(i)
+  #print(p1)
+}
+```
+
+
+
+############################
+Figure 4 panel E-G
+##############################
+
+```{r}
+
+num_corr_permutes = 10000
+
+
+mes_ect_ind = !is.na(median_mes_ratio) & !is.na(median_ect_ratio)
+mes_end_ind = !is.na(median_mes_ratio) & !is.na(median_end_ratio)
+end_ect_ind = !is.na(median_end_ratio) & !is.na(median_ect_ratio)
+
+par(pty = 's')
+
+
+mes_ect_comp_df = data.frame(mes_ect = median_mes_ratio[mes_ect_ind], ect_mes = median_ect_ratio[mes_ect_ind])
+mes_end_comp_df = data.frame(mes_end = median_mes_ratio[mes_end_ind], end_mes = median_end_ratio[mes_end_ind])
+end_ect_comp_df = data.frame(end_ect = median_end_ratio[end_ect_ind], ect_end = median_ect_ratio[end_ect_ind])
+
+
+mes_ect_corr = cor(median_mes_ratio[mes_ect_ind], median_ect_ratio[mes_ect_ind], method = 'pearson')
+
+#Do permutation to get a correlation pvalue 
+permute_cors = unlist(mclapply(1:num_corr_permutes, function(i) cor_permute(median_mes_ratio[mes_ect_ind], median_ect_ratio[mes_ect_ind]), mc.cores=5))
+mes_ect_corr_pvalue = sum(abs(permute_cors) > abs(mes_ect_corr) ) / num_corr_permutes
+sprintf('Mes-Ect correlation and pvalue: %f , %f ',mes_ect_corr, mes_ect_corr_pvalue )
+
+ggplot(mes_ect_comp_df, aes(x = mes_ect, y = ect_mes)) + geom_point() + ggtitle(sprintf('%s : %0.3f', deconv_tissues[tissue_num],mes_ect_corr )) + coord_fixed() + 
+  xlab('Median XCI ratio of Mesodermal markers') + ylab('Median XCI ratio of Ectodermal markers') + xlim(.5, 1) + ylim(.5, 1) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+file_name = sprintf('%s_mes_ect_marker_corr.pdf',deconv_tissues[tissue_num] )
+#ggsave(filename = file_name, path = '/home/werner/xchrom_snp_skew/code/graphs/cibersort_deconv/', device = 'pdf', useDingbats = F , height = 3, width = 3)
+
+
+
+mes_end_corr = cor(median_mes_ratio[mes_end_ind], median_end_ratio[mes_end_ind], method = 'pearson')
+
+#Do permutation to get a correlation pvalue 
+permute_cors = unlist(mclapply(1:num_corr_permutes, function(i) cor_permute(median_mes_ratio[mes_end_ind], median_end_ratio[mes_end_ind]), mc.cores=5))
+mes_end_corr_pvalue = sum(abs(permute_cors) > abs(mes_end_corr) ) / num_corr_permutes
+sprintf('Mes-End correlation and pvalue: %f , %f ',mes_end_corr, mes_end_corr_pvalue )
+
+ggplot(mes_end_comp_df, aes(x = mes_end, y = end_mes)) + geom_point() + ggtitle(sprintf('%s : %0.3f', deconv_tissues[tissue_num],mes_end_corr )) + coord_fixed() + 
+  xlab('Median XCI ratio of Mesodermal markers') + ylab('Median XCI ratio of Endodermal markers') +xlim(.5, 1) + ylim(.5, 1) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+file_name = sprintf('%s_mes_end_marker_corr.pdf',deconv_tissues[tissue_num] )
+#ggsave(filename = file_name, path = '/home/werner/xchrom_snp_skew/code/graphs/cibersort_deconv/', device = 'pdf', useDingbats = F, height = 3, width = 3 )
+
+
+
+end_ect_corr = cor(median_end_ratio[end_ect_ind], median_ect_ratio[end_ect_ind], method = 'pearson')
+
+#Do permutation to get a correlation pvalue 
+permute_cors = unlist(mclapply(1:num_corr_permutes, function(i) cor_permute(median_end_ratio[end_ect_ind], median_ect_ratio[end_ect_ind]), mc.cores=5))
+end_ect_corr_pvalue = sum(abs(permute_cors) > abs(end_ect_corr) ) / num_corr_permutes
+sprintf('End-Ect correlation and pvalue: %f , %f ',end_ect_corr, end_ect_corr_pvalue )
+
+ggplot(end_ect_comp_df, aes(x = end_ect, y = ect_end)) + geom_point() + ggtitle(sprintf('%s : %0.3f', deconv_tissues[tissue_num],end_ect_corr )) + coord_fixed() + 
+  xlab('Median XCI ratio of Endodermal markers') + ylab('Median XCI ratio of Ectodermal markers') +xlim(.5, 1) + ylim(.5, 1) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+file_name = sprintf('%s_end_ect_marker_corr.pdf',deconv_tissues[tissue_num] )
+#ggsave(filename = file_name, path = '/home/werner/xchrom_snp_skew/code/graphs/cibersort_deconv/', device = 'pdf', useDingbats = F, height = 3, width = 3 )
+
+
+
+
+```
+
+
+#######################
+Figure 4 panels E-G
+
+#########################
+
+
+samples to use is increasinng skew visualization
+lung - c(2, 60, 56, 33, 134)
+esophagus mucosa - c(18, 37, 128, 141, 31 )
+skin lower leg - c(199,175,15,17)
+skin suprapubic - 
+
+```{r}
+#Color vector for the germ layer violin plot
+gl_markers_colors = c('Mesoderm markers' = meso_color,'Endoderm markers' = endo_color,'Ectoderm markers' = ecto_color, 'Not markers' = 'white')
+
+for(i in c(199,175,15,17)){
+
+  test = tissue_snps_list.max[[i]]
+  germlayer_marker = rep('Not markers', nrow(test))
+  germlayer_marker[test$ensemblID %in% mes_markers] = 'Mesoderm markers'
+  germlayer_marker[test$ensemblID %in% ect_markers] = 'Ectoderm markers'
+  germlayer_marker[test$ensemblID %in% end_markers] = 'Endoderm markers'
+  
+  test$germlayer_marker = germlayer_marker
+  test$folded_snp_ratios = folded(test$C.1)
+  
+  p1 = ggplot(test, aes(x = germlayer_marker, y = folded_snp_ratios, fill = germlayer_marker )) + geom_violin(scale = 'width') + ylim(.45, 1) +
+    geom_point(position = position_jitter(seed = 1, width = 0.1)) + scale_fill_manual(values = gl_markers_colors) + ggtitle(donor_ids[i])
+  print(p1)
+}
+```
+
+
+
+
+
+
+```{r}
+tissue_graph_samples = c(18, 37, 128, 141, 31 )
+sample_donor_ids = donor_ids[tissue_graph_samples]
+
+graph_gl_marker_skew_list = tissue_snps_list.max[tissue_graph_samples]
+
+for(i in 1:length(graph_gl_marker_skew_list)){
+  graph_gl_marker_skew_list[[i]]$sample_vec = rep(sample_donor_ids[i], nrow(graph_gl_marker_skew_list[[i]])) 
+  
+}
+
+graph_gl_marker_skew_df = do.call('rbind',graph_gl_marker_skew_list )
+
+graph_gl_marker_skew_df$sample_vec = factor(graph_gl_marker_skew_df$sample_vec, levels =sample_donor_ids )
+
+germlayer_marker = rep('Not markers', nrow(graph_gl_marker_skew_df))
+germlayer_marker[graph_gl_marker_skew_df$ensemblID %in% mes_markers] = 'Mesoderm markers'
+germlayer_marker[graph_gl_marker_skew_df$ensemblID %in% ect_markers] = 'Ectoderm markers'
+germlayer_marker[graph_gl_marker_skew_df$ensemblID %in% end_markers] = 'Endoderm markers'
+
+graph_gl_marker_skew_df$germlayer_marker = germlayer_marker
+graph_gl_marker_skew_df$folded_snp_ratios = folded(graph_gl_marker_skew_df$C.1)
+
+graph_gl_marker_skew_df
+
+
+ggplot(graph_gl_marker_skew_df, aes(x = germlayer_marker, y = folded_snp_ratios, fill = germlayer_marker )) + geom_violin(scale = 'width') + ylim(.45, 1) +
+    geom_point(position = position_jitter(seed = 1, width = 0.1)) + scale_fill_manual(values = gl_markers_colors) + facet_wrap(~sample_vec, nrow = 1) + ggtitle(deconv_tissues[tissue_num]) +
+  xlab(sprintf('%s tissue examples',deconv_tissues[tissue_num])) + ylab('Folded SNP expression ratios') +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+
+file_name = sprintf('%s_series_increasing_germlayer_skews_violins.pdf',deconv_tissues[tissue_num] )
+#ggsave(filename = file_name, path = '/home/werner/xchrom_snp_skew/code/graphs/cibersort_deconv/', device = 'pdf', useDingbats = F )
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

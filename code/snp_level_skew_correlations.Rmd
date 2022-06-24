@@ -6,6 +6,7 @@ library(reshape2)
 library(ggplot2)
 library(ggridges)
 library(dplyr)
+library(parallel)
 ```
 
 
@@ -407,6 +408,114 @@ mean_donor_skews = aggregate(skew_and_stats_df$skew, list(skew_and_stats_df$dono
 ```
 
 
+See if specific donors are the ones switching directions
+
+```{r}
+
+all_donors = all_tissue_donor_specific_corr_df$donor_name
+switched_donors = all_tissue_donor_specific_corr_df$donor_name[all_tissue_donor_specific_corr_df$donor_specific_corrs < 0]
+
+table(switched_donors)
+length(table(switched_donors))
+switched_donor_names = names(table(switched_donors))
+length(table(all_donors))
+all_donors = names(table(all_donors))
+```
+
+
+
+```{r}
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+```
+
+
+```{r}
+
+num_tiss_vec = c()
+num_switched_vec = c()
+
+for(i in 1:dim(mean_donor_skews)[1]){
+
+  current_donor = as.character(mean_donor_skews$Group.1[i])
+  donor_df = all_tissue_donor_specific_corr_df[all_tissue_donor_specific_corr_df$donor_name == current_donor & all_tissue_donor_specific_corr_df$snp_num >= 20, ]
+  donor_tissues = unique(donor_df$tissue_name)
+  
+  tissue_check_switch = vector(mode = 'numeric', length = length(donor_tissues))
+  for(j in 1:length(donor_tissues)){
+    current_tiss = donor_tissues[j]
+    cross_tiss_direcs = donor_df$donor_specific_corrs[donor_df$tissue_name == current_tiss]
+    num_switched = sum(cross_tiss_direcs < 0, na.rm = T)
+    tissue_check_switch[j] = num_switched
+  }
+  
+  num_tiss = length(donor_tissues)
+  num_switched = getmode(tissue_check_switch)
+  
+  num_tiss_vec = c(num_tiss_vec, num_tiss)
+  num_switched_vec = c(num_switched_vec, num_switched)
+}
+
+
+```
+
+```{r}
+mean_donor_skews$number_of_tissues = num_tiss_vec
+mean_donor_skews$number_tissues_switched_XCI = num_switched_vec
+
+```
+
+
+```{r}
+num_tiss_filt = mean_donor_skews$number_of_tissues >= 10
+num_tiss_10_filt = mean_donor_skews[num_tiss_filt, 'number_of_tissues' ]
+num_switched_10_filt = mean_donor_skews[num_tiss_filt, 'number_tissues_switched_XCI' ]
+
+prop_switched = num_switched_10_filt / num_tiss_10_filt 
+mean(prop_switched)
+sd(prop_switched)
+prop_switched
+
+
+```
+
+
+Bin donors by mean skew and then plot mean skew on x and number of tissues switched on the y
+
+```{r}
+mean_skew_bin = vector(mode = 'character', length = dim(mean_donor_skews)[1])
+
+mean_skew_bin[ mean_donor_skews$x < .6] = 'mean skew < .6'
+mean_skew_bin[ mean_donor_skews$x >= .6 & mean_donor_skews$x < .7] = '.6 <= mean skew < .7'
+mean_skew_bin[ mean_donor_skews$x >= .7 & mean_donor_skews$x < .8] = '.7 <= mean skew < .8'
+mean_skew_bin[ mean_donor_skews$x >= .8 & mean_donor_skews$x < .9] = '.8 <= mean skew < .9'
+
+mean_skew_bin = factor(mean_skew_bin, levels = c('mean skew < .6','.6 <= mean skew < .7','.7 <= mean skew < .8','.8 <= mean skew < .9' ))
+
+mean_donor_skews$mean_skew_bin = mean_skew_bin
+
+ggplot(mean_donor_skews, aes(x = mean_skew_bin, y = number_tissues_switched_XCI)) + geom_boxplot(outlier.shape = NA) + geom_jitter(width = .2, height = 0, alpha = .5) + 
+  xlab('Mean donor tissue XCI ratios') + ylab('Number of tissues that switched XCI parental directions') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+
+```
+
+###############################
+Figure 5 panel e
+###############################
+
+```{r}
+mean_donor_skews$proportion_switched = mean_donor_skews$number_tissues_switched_XCI / mean_donor_skews$number_of_tissues
+ggplot(mean_donor_skews, aes(x = mean_skew_bin, y = proportion_switched)) + geom_boxplot(outlier.shape = NA)  + geom_jitter(width = .2, height = 0, alpha = .5) + 
+  xlab('Mean donor tissue XCI ratios') + ylab('Proportion of tissues that switched XCI parental directions') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = 'white'), panel.border = element_rect(color = "black", fill=NA, size=1))
+
+```
 
 
 Perform fischers exact test for each tissue compared to all tissues for instances of switched versus non switched XCI
@@ -646,6 +755,22 @@ estimated_tiss_cell_num = temp_lineage_df$est_n[index]
 
 par(pty = 's')
 plot(estimated_tiss_cell_num,proportion_swapped, ylab = 'Liklihood tissue changes XCI direction', xlab = 'Estimated cell # for tissue-specific lineage'  )
+
+cell_num_corr = cor(estimated_tiss_cell_num, proportion_swapped, method = 'pearson', use = 'complete.obs')
+cor_permute = function(x,y){
+  permute_y = sample(y,size=length(y), replace=FALSE)
+  corr = suppressWarnings(cor(x,permute_y, method='pearson', use = 'complete.obs'))
+  return(corr)
+}
+
+#Do permutation to get a correlation pvalue
+num_permutes = 10000
+permute_cors = unlist(mclapply(1:num_permutes, function(i) cor_permute(estimated_tiss_cell_num,proportion_swapped), mc.cores=5))
+hist(permute_cors)
+
+cell_num_corr_pval = sum(abs(permute_cors) > abs(cell_num_corr) ) / num_permutes
+sprintf('Correlation between tissue specification cell number and probability for switching XCI directions : %f  pvalue: %f', cell_num_corr, cell_num_corr_pval)
+
 ```
 
 
