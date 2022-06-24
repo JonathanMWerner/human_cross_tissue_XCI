@@ -29,7 +29,13 @@ Calculates statistics related to escape from XCI.
 7.)general_XCI_skew_graphs.Rmd
 Miscellaneous graphs 
 
-Description of data on http://labshare.cshl.edu/shares/gillislab/people/werner/xskew2021_preprint/data
+8.) bulk_deconvolution.Rmd
+Prepping files for input into CIBERsortx (https://cibersortx.stanford.edu/) and analyzing the CIBERsortx output. Identifies germ layer markers from the snRNA-seq GTEx data and explores their XCI ratios in the bulk GTEx data.
+
+9.) misc_reviewer_experiments.Rmd
+Miscellaneous experiments in response to reviewer comments. Generates graphs for Figure 5 A-B, distributions of XCI ratios across tissues for individual donors. Performs the noise simulation experiment for sampling allelic reads as read depth decreases, Figure 2 F. Compares estimated XCI ratios when including or excluding escape genes, Figure 3 F
+
+Description of data on http://labshare.cshl.edu/shares/gillislab/people/werner/werner_et_al_Dev_Cell_2022/data
 
 1.)gene_annotations_v25.Rdata 
 Genome annotations used in this study
@@ -41,7 +47,9 @@ Table containing annotations of inactive or escape status from the escape analys
 3.)tukiainen_study.txt 
 Escape annotations from https://www.nature.com/articles/nature24265
 
-
 4.)v8_GTEx_skew_and_stats_df.Rdata
-All estimated XCI ratios for the female GTEx samples we processed with associated statistics and metadata, generated from GTEx_SNP_gene_filtering_XCI_ratio_estimates.Rmd and bootstrapping_script. Can be used to replicate the main analyses in GTEx_XCI_ratio_data_analysis_cell_counts_correlations.Rmd   
+All estimated XCI ratios for the female GTEx samples we processed with associated statistics and metadata, generated from GTEx_SNP_gene_filtering_XCI_ratio_estimates.Rmd and bootstrapping_script. Can be used to replicate the main analyses in GTEx_XCI_ratio_data_analysis_cell_counts_correlations.Rmd 
+
+5.) cibersort_results
+All output files from the CIBERsortx deconvolution for the 10 GTEx tissues with snRNA-seq data available
 
