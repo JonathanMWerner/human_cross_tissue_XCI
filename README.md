@@ -1,6 +1,7 @@
 # human_cross_tissue_XCI
 
-This repository contains code for the manuscript "Cross-tissue analysis of allelic X-chromosome inactivation ratios resolves features of human development"
+This repository contains code for the manuscript "Variability of cross-tissue X-chromosome inactiavation characterizes timing of human embryonic lineage specification events", Dev Cell 2022.
+
 All relevant data generated from these notebooks are available on the FTP server: http://labshare.cshl.edu/shares/gillislab/people/werner/werner_et_al_Dev_Cell_2022/data
 To fully replicate all analysis, you first need access to and download the .fastq data from GTEx, which requires dbGAP permissions. Once you have the fastqs, the VCF and WIG files used as input for estimating XCI ratios can be generated following the snakemake pipeline in human_cross_tissue_XCI/code/snakemake_data_processing_pipeline
 
@@ -47,9 +48,12 @@ Table containing annotations of inactive or escape status from the escape analys
 3.)tukiainen_study.txt 
 Escape annotations from https://www.nature.com/articles/nature24265
 
-4.)v8_GTEx_skew_and_stats_df.Rdata
+4.) all_v8_GTEx_gene_filtered.skew.est.max.genes.Rdata
+The captured allele-specific expression for all filtered heterozygous loci per sample from our proocessed GTEx dataset. Provides read counts for the reference allele (A), alternate allele (C), total read count (A.1), reference allele ratio (C.1), alternate allele ratio (G) and metadata for the gene associated with the variant. These samples align with the sample metadata provided in the following v8_GTEx_skew_and_stats_df.Rdata
+
+5.)v8_GTEx_skew_and_stats_df.Rdata
 All estimated XCI ratios for the female GTEx samples we processed with associated statistics and metadata, generated from GTEx_SNP_gene_filtering_XCI_ratio_estimates.Rmd and bootstrapping_script. Can be used to replicate the main analyses in GTEx_XCI_ratio_data_analysis_cell_counts_correlations.Rmd 
 
-5.) cibersort_results
+6.) cibersort_results
 All output files from the CIBERsortx deconvolution for the 10 GTEx tissues with snRNA-seq data available
 
